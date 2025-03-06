@@ -8,3 +8,7 @@ Very loose "benchmarking" shows promise, with the following results
 
 This project doesn't aim to replace rsync, but rather to provide a faster alternative for those who need it (like me).
 
+## Usage
+```bash
+parsync --src <source> --dst <destination> [--threads <threads>]
+```

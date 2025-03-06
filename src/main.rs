@@ -1,11 +1,12 @@
-use clap::{Arg, Command};
+use clap::{Arg, Command, Parser};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Read;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
-use sha2::{Digest, Sha256};
 
 /// Get list of all files with their sizes
 fn get_file_list(source: &Path) -> Vec<(PathBuf, u64)> {
@@ -68,35 +69,38 @@ fn sync_files(files: &[(PathBuf, u64)], source: &Path, destination: &Path, pb: &
     });
 }
 
-fn main() {
-    let matches = Command::new("parsync")
-        .version("0.1")
-        .author("Saphereye")
-        .about("Parallel file synchronizer")
-        .arg(Arg::new("source")
-            .short('s')
-            .long("src")
-            .value_name("SOURCE")
-            .required(true)
-            .num_args(1))
-        .arg(Arg::new("destination")
-            .short('d')
-            .long("dest")
-            .value_name("DESTINATION")
-            .required(true)
-            .num_args(1))
-        .get_matches();
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// Source directory
+    #[arg(short, long, value_name = "SOURCE")]
+    source: String,
 
-    let source = PathBuf::from(matches.get_one::<String>("source").unwrap());
-    let destination = PathBuf::from(matches.get_one::<String>("destination").unwrap());
+    /// Destination directory
+    #[arg(short, long, value_name = "DESTINATION")]
+    destination: String,
+
+    /// Number of threads to use 
+    #[arg(short, long, value_name = "THREADS", default_value_t = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap().get()))]
+    threads: usize,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    let source = PathBuf::from(args.source);
+    let destination = PathBuf::from(args.destination);
 
     let mut files = get_file_list(&source);
     let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
-    let num_threads = std::thread::available_parallelism().unwrap().get();
-    
+    let num_threads = args
+        .threads;
+
     // Sort files by size (largest first) for better distribution
     files.sort_by(|a, b| b.1.cmp(&a.1));
-    
+
     // Distribute files across threads by balancing total size
     let mut chunks = vec![vec![]; num_threads];
     let mut chunk_sizes = vec![0; num_threads];
@@ -112,9 +116,13 @@ fn main() {
     }
 
     let pb = ProgressBar::new(total_size);
-    pb.set_style(ProgressStyle::with_template("[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+    pb.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+        )
         .unwrap()
-        .progress_chars("#>-"));
+        .progress_chars("#>-"),
+    );
 
     chunks.into_par_iter().for_each(|chunk| {
         sync_files(&chunk, &source, &destination, &pb);
@@ -122,4 +130,3 @@ fn main() {
 
     pb.finish_with_message("✅ Sync complete");
 }
-

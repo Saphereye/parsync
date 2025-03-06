@@ -2,9 +2,10 @@
 name = "parsync"
 version = "0.1.0"
 edition = "2021"
+description = "A parallel file synchronizer"
 
 [dependencies]
-clap = "4.5.31"
+clap = { version = "4.5.31", features = ["derive"] }
 indicatif = "0.17.11"
 rayon = "1.10.0"
 sha2 = "0.10.8"

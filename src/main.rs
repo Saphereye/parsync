@@ -17,7 +17,11 @@ fn get_file_list(source: &Path) -> Vec<(PathBuf, u64)> {
         .filter_map(Result::ok)
         .filter(|e| {
             let is_file_or_symlink = e.file_type().is_file() || e.file_type().is_symlink();
-            let is_empty_dir = e.file_type().is_dir() && e.path().read_dir().map(|mut i| i.next().is_none()).unwrap_or(false);
+            let is_empty_dir = e.file_type().is_dir()
+                && e.path()
+                    .read_dir()
+                    .map(|mut i| i.next().is_none())
+                    .unwrap_or(false);
             is_file_or_symlink || is_empty_dir
         })
         .map(|e| {
@@ -30,7 +34,6 @@ fn get_file_list(source: &Path) -> Vec<(PathBuf, u64)> {
         })
         .collect()
 }
-
 
 /// Compute SHA-256 hash of a file (optional integrity check)
 fn file_checksum(path: &Path) -> Option<String> {
@@ -61,20 +64,37 @@ fn sync_files(files: &[(PathBuf, u64)], source: &Path, destination: &Path, pb: &
             fs::create_dir_all(parent).unwrap();
         }
 
+        // Handle empty directories
+        if size == &0 && file.is_dir() {
+            if let Err(e) = fs::create_dir_all(&dest_file) {
+                error!("Failed to create directory {:?}: {}", dest_file, e);
+            } else {
+                println!("Created directory {:?}", dest_file);
+            }
+            return;
+        }
+
         // Check if file needs copying
         if dest_file.exists() {
             let src_hash = file_checksum(file);
             let dest_hash = file_checksum(&dest_file);
             if src_hash == dest_hash {
                 pb.inc(*size);
-                debug!("Skipping {:?}, checksums math", file);
+                println!("Skipping {:?}, checksums match", file);
                 return;
+            } else {
+                println!(
+                    "Checksums do not match for {:?}: {:?} != {:?}",
+                    file, src_hash, dest_hash
+                );
             }
         }
 
         // Copy file
         if let Err(e) = fs::copy(file, &dest_file) {
             error!("Failed to copy {:?}: {}", file, e);
+        } else {
+            println!("Copied {:?} to {:?}", file, dest_file);
         }
 
         pb.inc(*size);

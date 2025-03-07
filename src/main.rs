@@ -1,5 +1,6 @@
-use clap::{Arg, Command, Parser};
+use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+use log::{debug, error};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -11,9 +12,10 @@ use walkdir::WalkDir;
 /// Get list of all files with their sizes
 fn get_file_list(source: &Path) -> Vec<(PathBuf, u64)> {
     WalkDir::new(source)
+        .follow_links(true)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| !e.file_type().is_dir())
         .map(|e| {
             let size = e.metadata().map(|m| m.len()).unwrap_or(0);
             (e.path().to_path_buf(), size)
@@ -56,13 +58,14 @@ fn sync_files(files: &[(PathBuf, u64)], source: &Path, destination: &Path, pb: &
             let dest_hash = file_checksum(&dest_file);
             if src_hash == dest_hash {
                 pb.inc(*size);
-                return; // Skip unchanged files
+                debug!("Skipping {:?}, checksums math", file);
+                return;
             }
         }
 
         // Copy file
         if let Err(e) = fs::copy(file, &dest_file) {
-            eprintln!("Failed to copy {:?}: {}", file, e);
+            error!("Failed to copy {:?}: {}", file, e);
         }
 
         pb.inc(*size);
@@ -80,7 +83,7 @@ struct Args {
     #[arg(short, long, value_name = "DESTINATION")]
     destination: String,
 
-    /// Number of threads to use 
+    /// Number of threads to use
     #[arg(short, long, value_name = "THREADS", default_value_t = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap().get()))]
@@ -88,6 +91,7 @@ struct Args {
 }
 
 fn main() {
+    env_logger::init();
     let args = Args::parse();
 
     let source = PathBuf::from(args.source);
@@ -95,13 +99,14 @@ fn main() {
 
     let mut files = get_file_list(&source);
     let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
-    let num_threads = args
-        .threads;
+    let num_threads = args.threads;
 
     // Sort files by size (largest first) for better distribution
+    debug!("Sorting file by sizes");
     files.sort_by(|a, b| b.1.cmp(&a.1));
 
     // Distribute files across threads by balancing total size
+    debug!("Calculating the data chunks");
     let mut chunks = vec![vec![]; num_threads];
     let mut chunk_sizes = vec![0; num_threads];
     for (file, size) in files {
@@ -124,6 +129,7 @@ fn main() {
         .progress_chars("#>-"),
     );
 
+    debug!("Sending chunk to parallel processors");
     chunks.into_par_iter().for_each(|chunk| {
         sync_files(&chunk, &source, &destination, &pb);
     });

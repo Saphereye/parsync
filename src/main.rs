@@ -15,13 +15,22 @@ fn get_file_list(source: &Path) -> Vec<(PathBuf, u64)> {
         .follow_links(true)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| !e.file_type().is_dir())
+        .filter(|e| {
+            let is_file_or_symlink = e.file_type().is_file() || e.file_type().is_symlink();
+            let is_empty_dir = e.file_type().is_dir() && e.path().read_dir().map(|mut i| i.next().is_none()).unwrap_or(false);
+            is_file_or_symlink || is_empty_dir
+        })
         .map(|e| {
-            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = if e.file_type().is_dir() {
+                0
+            } else {
+                e.metadata().map(|m| m.len()).unwrap_or(0)
+            };
             (e.path().to_path_buf(), size)
         })
         .collect()
 }
+
 
 /// Compute SHA-256 hash of a file (optional integrity check)
 fn file_checksum(path: &Path) -> Option<String> {

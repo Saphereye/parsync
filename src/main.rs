@@ -22,29 +22,28 @@ fn get_file_list(
         .follow_links(true)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| {
-            debug!("{:?}", e);
+        .par_bridge()
+        .filter_map(|e| {
+            let path = e.path();
+            let path_str = path.to_string_lossy();
+
             let is_file_or_symlink = e.file_type().is_file() || e.file_type().is_symlink();
             let is_empty_dir = e.file_type().is_dir()
-                && e.path()
-                    .read_dir()
-                    .map(|mut i| i.next().is_none())
-                    .unwrap_or(false);
-            (is_file_or_symlink || is_empty_dir) && {
-                let path = e.path();
-                let path_str = path.to_string_lossy();
-                let include_match = include.as_ref().map(|r| r.is_match(&path_str)).unwrap_or(true);
-                let exclude_match = exclude.as_ref().map(|r| r.is_match(&path_str)).unwrap_or(false);
-                include_match && !exclude_match
-            }
-        })
-        .map(|e| {
-            let size = if e.file_type().is_dir() {
-                0
+                && path.read_dir().map(|mut i| i.next().is_none()).unwrap_or(false);
+
+            if (is_file_or_symlink || is_empty_dir)
+                && include.as_ref().map(|r| r.is_match(&path_str)).unwrap_or(true)
+                && !exclude.as_ref().map(|r| r.is_match(&path_str)).unwrap_or(false)
+            {
+                let size = if e.file_type().is_dir() {
+                    0
+                } else {
+                    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                };
+                Some((path.to_path_buf(), size))
             } else {
-                e.metadata().map(|m| m.len()).unwrap_or(0)
-            };
-            (e.path().to_path_buf(), size)
+                None
+            }
         })
         .collect()
 }
@@ -145,7 +144,7 @@ struct Args {
     threads: usize,
 
     /// Disables checksum verification
-    #[arg(short, long)]
+    #[arg(long)]
     no_verify: bool,
 
     /// Enables verbose output
@@ -165,6 +164,17 @@ struct Args {
     dry_run: bool,
 }
 
+fn u64_to_human_readable(size: u64) -> String {
+    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    let mut size = size as f64;
+    let mut unit = 0;
+    while size >= 1024.0 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{:.2} {}", size, units[unit])
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -181,7 +191,7 @@ fn main() {
 
     let mut files = get_file_list(&source, args.include, args.exclude);
     let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
-    debug!("Total size of source directory: {}", total_size);
+    debug!("Total size relevant files: {}", u64_to_human_readable(total_size));
     let num_threads = args.threads;
     debug!("Using {} threads for the process", num_threads);
 

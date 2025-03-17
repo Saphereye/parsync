@@ -320,6 +320,7 @@ dependencies = [
  "indicatif",
  "log",
  "rayon",
+ "regex",
  "sha2",
  "walkdir",
  "xxhash-rust",

@@ -8,21 +8,35 @@ use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+use regex::Regex;
 
 /// Get list of all files with their sizes
-fn get_file_list(source: &Path) -> Vec<(PathBuf, u64)> {
+fn get_file_list(
+    source: &Path,
+    include_regex: Option<String>,
+    exclude_regex: Option<String>,
+) -> Vec<(PathBuf, u64)> {
+    let include = include_regex.map(|r| Regex::new(&r).unwrap());
+    let exclude = exclude_regex.map(|r| Regex::new(&r).unwrap());
     WalkDir::new(source)
         .follow_links(true)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| {
+            debug!("{:?}", e);
             let is_file_or_symlink = e.file_type().is_file() || e.file_type().is_symlink();
             let is_empty_dir = e.file_type().is_dir()
                 && e.path()
                     .read_dir()
                     .map(|mut i| i.next().is_none())
                     .unwrap_or(false);
-            is_file_or_symlink || is_empty_dir
+            (is_file_or_symlink || is_empty_dir) && {
+                let path = e.path();
+                let path_str = path.to_string_lossy();
+                let include_match = include.as_ref().map(|r| r.is_match(&path_str)).unwrap_or(true);
+                let exclude_match = exclude.as_ref().map(|r| r.is_match(&path_str)).unwrap_or(false);
+                include_match && !exclude_match
+            }
         })
         .map(|e| {
             let size = if e.file_type().is_dir() {
@@ -51,7 +65,14 @@ fn file_checksum(path: &Path) -> Option<String> {
 }
 
 /// Copy files in parallel, considering size-based progress
-fn sync_files(files: &[(PathBuf, u64)], source: &Path, destination: &Path, pb: &ProgressBar) {
+fn sync_files(
+    files: &[(PathBuf, u64)],
+    source: &Path,
+    destination: &Path,
+    pb: &ProgressBar,
+    no_verify: bool,
+    dry_run: bool,
+) {
     let src_arc = source.to_path_buf();
     let dest_arc = destination.to_path_buf();
 
@@ -61,7 +82,10 @@ fn sync_files(files: &[(PathBuf, u64)], source: &Path, destination: &Path, pb: &
 
         // Ensure destination directory exists
         if let Some(parent) = dest_file.parent() {
-            fs::create_dir_all(parent).unwrap();
+            if let Err(e) = fs::create_dir_all(parent) {
+                error!("Failed to create directory {:?}: {}", parent, e);
+                return;
+            }
         }
 
         // Handle empty directories
@@ -69,21 +93,21 @@ fn sync_files(files: &[(PathBuf, u64)], source: &Path, destination: &Path, pb: &
             if let Err(e) = fs::create_dir_all(&dest_file) {
                 error!("Failed to create directory {:?}: {}", dest_file, e);
             } else {
-                println!("Created directory {:?}", dest_file);
+                debug!("Created directory {:?}", dest_file);
             }
             return;
         }
 
         // Check if file needs copying
-        if dest_file.exists() {
+        if no_verify && dest_file.exists() {
             let src_hash = file_checksum(file);
             let dest_hash = file_checksum(&dest_file);
             if src_hash == dest_hash {
                 pb.inc(*size);
-                println!("Skipping {:?}, checksums match", file);
+                debug!("Skipping {:?}, checksums match", file);
                 return;
             } else {
-                println!(
+                debug!(
                     "Checksums do not match for {:?}: {:?} != {:?}",
                     file, src_hash, dest_hash
                 );
@@ -91,10 +115,12 @@ fn sync_files(files: &[(PathBuf, u64)], source: &Path, destination: &Path, pb: &
         }
 
         // Copy file
-        if let Err(e) = fs::copy(file, &dest_file) {
+        if dry_run {
+            debug!("Dry-run: Would copy {:?} to {:?}", file, dest_file);
+        } else if let Err(e) = fs::copy(file, &dest_file) {
             error!("Failed to copy {:?}: {}", file, e);
         } else {
-            println!("Copied {:?} to {:?}", file, dest_file);
+            debug!("Copied {:?} to {:?}", file, dest_file);
         }
 
         pb.inc(*size);
@@ -117,18 +143,47 @@ struct Args {
         .map(|n| n.get())
         .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap().get()))]
     threads: usize,
+
+    /// Disables checksum verification
+    #[arg(short, long)]
+    no_verify: bool,
+
+    /// Enables verbose output
+    #[arg(long)]
+    verbose: bool,
+
+    /// Regex for files/folders to include
+    #[arg(short, long, value_name = "INCLUDE")]
+    include: Option<String>,
+
+    /// Regex for files/folders to exclude
+    #[arg(short, long, value_name = "EXCLUDE")]
+    exclude: Option<String>,
+
+    /// Enables dry-run mode
+    #[arg(long)]
+    dry_run: bool,
 }
 
 fn main() {
-    env_logger::init();
     let args = Args::parse();
 
-    let source = PathBuf::from(args.source);
-    let destination = PathBuf::from(args.destination);
+    if args.verbose {
+        env_logger::Builder::new()
+            .filter_level(log::LevelFilter::Debug)
+            .init();
+    }
 
-    let mut files = get_file_list(&source);
+    let source = PathBuf::from(args.source);
+    debug!("Set source as: {:?}", source);
+    let destination = PathBuf::from(args.destination);
+    debug!("Set destination as: {:?}", destination);
+
+    let mut files = get_file_list(&source, args.include, args.exclude);
     let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
+    debug!("Total size of source directory: {}", total_size);
     let num_threads = args.threads;
+    debug!("Using {} threads for the process", num_threads);
 
     // Sort files by size (largest first) for better distribution
     debug!("Sorting file by sizes");
@@ -149,10 +204,11 @@ fn main() {
         chunk_sizes[min_index] += size;
     }
 
+    debug!("Setting the progress bar");
     let pb = ProgressBar::new(total_size);
     pb.set_style(
         ProgressStyle::with_template(
-            "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+            "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) ({bytes_per_sec})",
         )
         .unwrap()
         .progress_chars("#>-"),
@@ -160,7 +216,14 @@ fn main() {
 
     debug!("Sending chunk to parallel processors");
     chunks.into_par_iter().for_each(|chunk| {
-        sync_files(&chunk, &source, &destination, &pb);
+        sync_files(
+            &chunk,
+            &source,
+            &destination,
+            &pb,
+            args.no_verify,
+            args.dry_run,
+        );
     });
 
     pb.finish_with_message("✅ Sync complete");

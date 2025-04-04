@@ -234,7 +234,7 @@ fn u64_to_human_readable(size: u64) -> String {
     format!("{:.2} {}", size, units[unit])
 }
 
-fn compare_dirs(src: &Path, dest: &Path) -> bool {
+fn compare_dirs(src: &Path, dest: &Path) {
     let mut src_files: Vec<_> = WalkDir::new(src)
         .into_iter()
         .filter_map(Result::ok)
@@ -253,7 +253,6 @@ fn compare_dirs(src: &Path, dest: &Path) -> bool {
     src_files.sort();
     dest_files.sort();
 
-    let mut success = true;
     let (mut i, mut j) = (0, 0);
 
     while i < src_files.len() || j < dest_files.len() {
@@ -262,12 +261,10 @@ fn compare_dirs(src: &Path, dest: &Path) -> bool {
                 std::cmp::Ordering::Less => {
                     eprintln!("MISSING in dest: {:?}", src_file);
                     i += 1;
-                    success = false;
                 }
                 std::cmp::Ordering::Greater => {
                     eprintln!("EXTRA in dest: {:?}", dest_file);
                     j += 1;
-                    success = false;
                 }
                 std::cmp::Ordering::Equal => {
                     compare_file_metadata(src, dest, src_file);
@@ -278,18 +275,14 @@ fn compare_dirs(src: &Path, dest: &Path) -> bool {
             (Some(src_file), None) => {
                 eprintln!("MISSING in dest: {:?}", src_file);
                 i += 1;
-                success = false;
             }
             (None, Some(dest_file)) => {
                 eprintln!("EXTRA in dest: {:?}", dest_file);
                 j += 1;
-                success = false;
             }
             (None, None) => break,
         }
     }
-
-    success
 }
 
 fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) {
@@ -361,12 +354,7 @@ fn main() {
     debug!("Set destination as: {:?}", destination);
 
     if args.diff {
-        let success = compare_dirs(&source, &destination);
-        if success {
-            println!("Directories are identical");
-        } else {
-            println!("Directories are different");
-        }
+        compare_dirs(&source, &destination);
         return;
     }
 

@@ -25,17 +25,20 @@ fn get_file_list(
         .filter_map(Result::ok)
         .par_bridge()
         .filter_map(|e| {
+            debug!("Processing file: {:?}", e.path());
             let path = e.path();
             let path_str = path.to_string_lossy();
 
-            let is_file_or_symlink = e.file_type().is_file() || e.file_type().is_symlink();
-            let is_empty_dir = e.file_type().is_dir()
+            let is_symlink = e.file_type().is_symlink();
+            let is_file = e.file_type().is_file();
+            let is_dir = e.file_type().is_dir();
+            let is_empty_dir = is_dir
                 && path
                     .read_dir()
                     .map(|mut i| i.next().is_none())
                     .unwrap_or(false);
 
-            if (is_file_or_symlink || is_empty_dir)
+            if (is_file || is_symlink || is_empty_dir)
                 && include
                     .as_ref()
                     .map(|r| r.is_match(&path_str))
@@ -45,8 +48,11 @@ fn get_file_list(
                     .map(|r| r.is_match(&path_str))
                     .unwrap_or(false)
             {
-                let size = if e.file_type().is_dir() {
+                let size = if is_dir {
                     0
+                } else if is_symlink {
+                    // Use symlink metadata to get the size of the symlink itself
+                    fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0)
                 } else {
                     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
                 };
@@ -133,21 +139,41 @@ fn sync_files(
         if dry_run {
             debug!("Dry-run: Would copy {:?} to {:?}", file, dest_file);
         } else {
-            if file.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            if file
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
                 if let Ok(target) = fs::read_link(file) {
-                    if !target.exists() {
-                        debug!("Broken symlink detected: {:?} -> {:?}. Creating empty file.", file, target);
-                        if let Err(e) = File::create(&dest_file) {
-                            error!("Failed to create file for broken symlink {:?}: {}", dest_file, e);
-                        }
-                    } else if let Err(e) = fs::copy(file, &dest_file) {
-                        error!("Failed to copy {:?}: {}", file, e);
+                    if dry_run {
+                        debug!(
+                            "Dry-run: Would create symlink {:?} -> {:?}",
+                            dest_file, target
+                        );
+                    } else if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
+                        error!(
+                            "Failed to create symlink {:?} -> {:?}: {}",
+                            dest_file, target, e
+                        );
+                    }
+                } else {
+                    // Handle broken symlinks
+                    if dry_run {
+                        debug!(
+                            "Dry-run: Would create broken symlink {:?} -> {:?}",
+                            dest_file, file
+                        );
+                    } else if let Err(e) = std::os::unix::fs::symlink(file, &dest_file) {
+                        error!(
+                            "Failed to create broken symlink {:?} -> {:?}: {}",
+                            dest_file, file, e
+                        );
                     }
                 }
             } else if let Err(e) = fs::copy(file, &dest_file) {
                 error!("Failed to copy {:?}: {}", file, e);
             }
-        } 
+        }
 
         if let Some(pb) = pb {
             pb.inc(*size);
@@ -207,9 +233,7 @@ fn u64_to_human_readable(size: u64) -> String {
     }
     format!("{:.2} {}", size, units[unit])
 }
-fn strip_top_level(path: &Path) -> PathBuf {
-    path.iter().skip(1).collect()
-}
+
 fn compare_dirs(src: &Path, dest: &Path) -> bool {
     let mut src_files: Vec<_> = WalkDir::new(src)
         .into_iter()
@@ -323,9 +347,7 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) {
 
 fn main() {
     let args = Args::parse();
-
     let mut builder = env_logger::Builder::new();
-
     builder.filter_level(log::LevelFilter::Error); // Show errors by default
 
     if args.verbose {
@@ -333,7 +355,6 @@ fn main() {
     }
 
     builder.init();
-
     let source = PathBuf::from(args.source);
     debug!("Set source as: {:?}", source);
     let destination = PathBuf::from(args.destination);
@@ -352,7 +373,8 @@ fn main() {
     let mut files = get_file_list(&source, args.include, args.exclude);
     let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
     debug!(
-        "Total size relevant files: {}",
+        "Found {} files, with total size relevant files: {}",
+        files.len(),
         u64_to_human_readable(total_size)
     );
     let num_threads = args.threads;

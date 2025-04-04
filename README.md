@@ -12,7 +12,7 @@ This project doesn't aim to replace rsync, but rather to provide a faster altern
 > The commands used for the above benchmark were:
 > - rsync: `rsync -az --info=progress2 --no-inc-recursive --human-readable --partial /path/to/source /path/to/destination`
 > - parsync: `parsync -s /path/to/source --d /path/to/destination --threads 12`
-> - parsync + parallel: `cd /path/to/source && \ls -1 | parallel -v -j12 rsync -raz --progress {} /path/to/destination/{}`
+> - rsync + parallel: `cd /path/to/source && \ls -1 | parallel -v -j12 rsync -raz --progress {} /path/to/destination/{}`
 
 ## Usage
 ```bash

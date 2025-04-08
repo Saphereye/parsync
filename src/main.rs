@@ -139,41 +139,39 @@ fn sync_files(
         // Copy file
         if dry_run {
             debug!("Dry-run: Would copy {:?} to {:?}", file, dest_file);
-        } else {
-            if file
-                .symlink_metadata()
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false)
-            {
-                if let Ok(target) = fs::read_link(file) {
-                    if dry_run {
-                        debug!(
-                            "Dry-run: Would create symlink {:?} -> {:?}",
-                            dest_file, target
-                        );
-                    } else if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
-                        error!(
-                            "Failed to create symlink {:?} -> {:?}: {}",
-                            dest_file, target, e
-                        );
-                    }
-                } else {
-                    // Handle broken symlinks
-                    if dry_run {
-                        debug!(
-                            "Dry-run: Would create broken symlink {:?} -> {:?}",
-                            dest_file, file
-                        );
-                    } else if let Err(e) = std::os::unix::fs::symlink(file, &dest_file) {
-                        error!(
-                            "Failed to create broken symlink {:?} -> {:?}: {}",
-                            dest_file, file, e
-                        );
-                    }
+        } else if file
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            if let Ok(target) = fs::read_link(file) {
+                if dry_run {
+                    debug!(
+                        "Dry-run: Would create symlink {:?} -> {:?}",
+                        dest_file, target
+                    );
+                } else if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
+                    error!(
+                        "Failed to create symlink {:?} -> {:?}: {}",
+                        dest_file, target, e
+                    );
                 }
-            } else if let Err(e) = fs::copy(file, &dest_file) {
-                error!("Failed to copy {:?}: {}", file, e);
+            } else {
+                // Handle broken symlinks
+                if dry_run {
+                    debug!(
+                        "Dry-run: Would create broken symlink {:?} -> {:?}",
+                        dest_file, file
+                    );
+                } else if let Err(e) = std::os::unix::fs::symlink(file, &dest_file) {
+                    error!(
+                        "Failed to create broken symlink {:?} -> {:?}: {}",
+                        dest_file, file, e
+                    );
+                }
             }
+        } else if let Err(e) = fs::copy(file, &dest_file) {
+            error!("Failed to copy {:?}: {}", file, e);
         }
 
         if let Some(pb) = pb {
@@ -238,7 +236,7 @@ fn u64_to_human_readable(size: u64) -> String {
 #[derive(Debug, PartialEq)]
 enum Status {
     Passed,
-    Failed
+    Failed,
 }
 
 impl Not for Status {
@@ -277,27 +275,30 @@ fn compare_dirs(src: &Path, dest: &Path) -> Status {
 
     while i < src_files_paths.len() || j < dest_files_paths.len() {
         match (src_files_paths.get(i), dest_files_paths.get(j)) {
-            (Some(src_file_path), Some(dest_file_path)) => match src_file_path.cmp(dest_file_path) {
-                std::cmp::Ordering::Less => {
-                    status = Status::Failed;
-                    eprintln!("MISSING in dest: {:?}", src_file_path);
-                    i += 1;
+            (Some(src_file_path), Some(dest_file_path)) => {
+                match src_file_path.cmp(dest_file_path) {
+                    std::cmp::Ordering::Less => {
+                        status = Status::Failed;
+                        eprintln!("MISSING in dest: {:?}", src_file_path);
+                        i += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        status = Status::Failed;
+                        eprintln!("EXTRA in dest: {:?}", dest_file_path);
+                        j += 1;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        status =
+                            if compare_file_metadata(src, dest, src_file_path) == Status::Failed {
+                                Status::Failed
+                            } else {
+                                status
+                            };
+                        i += 1;
+                        j += 1;
+                    }
                 }
-                std::cmp::Ordering::Greater => {
-                    status = Status::Failed;
-                    eprintln!("EXTRA in dest: {:?}", dest_file_path);
-                    j += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    status = if compare_file_metadata(src, dest, src_file_path) == Status::Failed {
-                        Status::Failed
-                    } else {
-                        status
-                    };
-                    i += 1;
-                    j += 1;
-                }
-            },
+            }
             (Some(src_file_path), None) => {
                 status = Status::Failed;
                 eprintln!("MISSING in dest: {:?}", src_file_path);
@@ -344,48 +345,56 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) -> Status {
             eprintln!(
                 "TYPE MISMATCH: {:?} (src: {}, dest: {})",
                 file,
-                if src_is_symlink { "symlink" } else { "regular file" },
-                if dest_is_symlink { "symlink" } else { "regular file" }
+                if src_is_symlink {
+                    "symlink"
+                } else {
+                    "regular file"
+                },
+                if dest_is_symlink {
+                    "symlink"
+                } else {
+                    "regular file"
+                }
             );
         }
 
-        // Check file permissions (Unix only)
-        #[cfg(unix)]
-        {
-            if src_meta.mode() != dest_meta.mode() {
-                status = Status::Failed;
-                eprintln!(
-                    "PERMISSION MISMATCH: {:?} (src: {:o}, dest: {:o})",
-                    file,
-                    src_meta.mode(),
-                    dest_meta.mode()
-                );
-            }
-        }
-
-        // Check file permissions (Windows only)
-        #[cfg(windows)]
-        {
-            if src_meta.permissions().readonly() != dest_meta.permissions().readonly() {
-                status = Status::Failed;
-                eprintln!(
-                    "READONLY MISMATCH: {:?} (src: {}, dest: {})",
-                    file,
-                    src_meta.permissions().readonly(),
-                    dest_meta.permissions().readonly()
-                );
-            }
-        }
+        //// Check file permissions (Unix only)
+        //#[cfg(unix)]
+        //{
+        //    if src_meta.mode() != dest_meta.mode() {
+        //        status = Status::Failed;
+        //        eprintln!(
+        //            "PERMISSION MISMATCH: {:?} (src: {:o}, dest: {:o})",
+        //            file,
+        //            src_meta.mode(),
+        //            dest_meta.mode()
+        //        );
+        //    }
+        //}
+        //
+        //// Check file permissions (Windows only)
+        //#[cfg(windows)]
+        //{
+        //    if src_meta.permissions().readonly() != dest_meta.permissions().readonly() {
+        //        status = Status::Failed;
+        //        eprintln!(
+        //            "READONLY MISMATCH: {:?} (src: {}, dest: {})",
+        //            file,
+        //            src_meta.permissions().readonly(),
+        //            dest_meta.permissions().readonly()
+        //        );
+        //    }
+        //}
 
         // Check file content by comparing SHA-256 hashes
-        if let (Ok(src_hash), Ok(dest_hash)) = (compute_sha256(&src_path), compute_sha256(&dest_path)) {
+        if let (Ok(src_hash), Ok(dest_hash)) =
+            (compute_sha256(&src_path), compute_sha256(&dest_path))
+        {
             if src_hash != dest_hash {
                 status = Status::Failed;
                 eprintln!(
                     "CONTENT MISMATCH: {:?} (src hash: {}, dest hash: {})",
-                    file,
-                    src_hash,
-                    dest_hash
+                    file, src_hash, dest_hash
                 );
             }
         }

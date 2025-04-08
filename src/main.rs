@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Read;
 use std::num::NonZeroUsize;
+use std::ops::Not;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -234,15 +235,32 @@ fn u64_to_human_readable(size: u64) -> String {
     format!("{:.2} {}", size, units[unit])
 }
 
-fn compare_dirs(src: &Path, dest: &Path) {
-    let mut src_files: Vec<_> = WalkDir::new(src)
+#[derive(Debug, PartialEq)]
+enum Status {
+    Passed,
+    Failed
+}
+
+impl Not for Status {
+    type Output = Status;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Status::Passed => Status::Failed,
+            Status::Failed => Status::Passed,
+        }
+    }
+}
+
+fn compare_dirs(src: &Path, dest: &Path) -> Status {
+    let mut src_files_paths: Vec<_> = WalkDir::new(src)
         .into_iter()
         .filter_map(Result::ok)
         .map(|e| e.path().strip_prefix(src).unwrap().to_path_buf()) // Strip src itself
         //.map(|p| strip_top_level(&p)) // Strip the first component
         .collect();
 
-    let mut dest_files: Vec<_> = WalkDir::new(dest)
+    let mut dest_files_paths: Vec<_> = WalkDir::new(dest)
         .into_iter()
         .filter_map(Result::ok)
         .map(|e| e.path().strip_prefix(dest).unwrap().to_path_buf()) // Strip dest itself
@@ -250,51 +268,66 @@ fn compare_dirs(src: &Path, dest: &Path) {
         .collect();
 
     // Sort both lists for linear traversal
-    src_files.sort();
-    dest_files.sort();
+    src_files_paths.sort();
+    dest_files_paths.sort();
+
+    let mut status = Status::Passed;
 
     let (mut i, mut j) = (0, 0);
 
-    while i < src_files.len() || j < dest_files.len() {
-        match (src_files.get(i), dest_files.get(j)) {
-            (Some(src_file), Some(dest_file)) => match src_file.cmp(dest_file) {
+    while i < src_files_paths.len() || j < dest_files_paths.len() {
+        match (src_files_paths.get(i), dest_files_paths.get(j)) {
+            (Some(src_file_path), Some(dest_file_path)) => match src_file_path.cmp(dest_file_path) {
                 std::cmp::Ordering::Less => {
-                    eprintln!("MISSING in dest: {:?}", src_file);
+                    status = Status::Failed;
+                    eprintln!("MISSING in dest: {:?}", src_file_path);
                     i += 1;
                 }
                 std::cmp::Ordering::Greater => {
-                    eprintln!("EXTRA in dest: {:?}", dest_file);
+                    status = Status::Failed;
+                    eprintln!("EXTRA in dest: {:?}", dest_file_path);
                     j += 1;
                 }
                 std::cmp::Ordering::Equal => {
-                    compare_file_metadata(src, dest, src_file);
+                    status = if compare_file_metadata(src, dest, src_file_path) == Status::Failed {
+                        Status::Failed
+                    } else {
+                        status
+                    };
                     i += 1;
                     j += 1;
                 }
             },
-            (Some(src_file), None) => {
-                eprintln!("MISSING in dest: {:?}", src_file);
+            (Some(src_file_path), None) => {
+                status = Status::Failed;
+                eprintln!("MISSING in dest: {:?}", src_file_path);
                 i += 1;
             }
-            (None, Some(dest_file)) => {
-                eprintln!("EXTRA in dest: {:?}", dest_file);
+            (None, Some(dest_file_path)) => {
+                status = Status::Failed;
+                eprintln!("EXTRA in dest: {:?}", dest_file_path);
                 j += 1;
             }
             (None, None) => break,
         }
     }
+
+    status
 }
 
-fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) {
+fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) -> Status {
     let src_path = src.join(file);
     let dest_path = dest.join(file);
 
     let src_meta = fs::symlink_metadata(&src_path).ok();
     let dest_meta = fs::symlink_metadata(&dest_path).ok();
 
+    let mut status = Status::Passed;
+
     if let (Some(src_meta), Some(dest_meta)) = (src_meta, dest_meta) {
         // Check file size
         if src_meta.len() != dest_meta.len() {
+            status = Status::Failed;
             eprintln!(
                 "SIZE MISMATCH: {:?} (src: {} bytes, dest: {} bytes)",
                 file,
@@ -307,19 +340,12 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) {
         let src_is_symlink = src_meta.file_type().is_symlink();
         let dest_is_symlink = dest_meta.file_type().is_symlink();
         if src_is_symlink != dest_is_symlink {
+            status = Status::Failed;
             eprintln!(
                 "TYPE MISMATCH: {:?} (src: {}, dest: {})",
                 file,
-                if src_is_symlink {
-                    "symlink"
-                } else {
-                    "regular file"
-                },
-                if dest_is_symlink {
-                    "symlink"
-                } else {
-                    "regular file"
-                }
+                if src_is_symlink { "symlink" } else { "regular file" },
+                if dest_is_symlink { "symlink" } else { "regular file" }
             );
         }
 
@@ -327,6 +353,7 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) {
         #[cfg(unix)]
         {
             if src_meta.mode() != dest_meta.mode() {
+                status = Status::Failed;
                 eprintln!(
                     "PERMISSION MISMATCH: {:?} (src: {:o}, dest: {:o})",
                     file,
@@ -335,7 +362,56 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) {
                 );
             }
         }
+
+        // Check file permissions (Windows only)
+        #[cfg(windows)]
+        {
+            if src_meta.permissions().readonly() != dest_meta.permissions().readonly() {
+                status = Status::Failed;
+                eprintln!(
+                    "READONLY MISMATCH: {:?} (src: {}, dest: {})",
+                    file,
+                    src_meta.permissions().readonly(),
+                    dest_meta.permissions().readonly()
+                );
+            }
+        }
+
+        // Check file content by comparing SHA-256 hashes
+        if let (Ok(src_hash), Ok(dest_hash)) = (compute_sha256(&src_path), compute_sha256(&dest_path)) {
+            if src_hash != dest_hash {
+                status = Status::Failed;
+                eprintln!(
+                    "CONTENT MISMATCH: {:?} (src hash: {}, dest hash: {})",
+                    file,
+                    src_hash,
+                    dest_hash
+                );
+            }
+        }
     }
+
+    status
+}
+
+fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    use std::fs::File;
+    use std::io::{BufReader, Read};
+
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+
+    while let Ok(bytes_read) = reader.read(&mut buffer) {
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn main() {
@@ -450,7 +526,7 @@ mod tests {
             sync_files(&chunk, &source, &destination, &None, true, false);
         });
 
-        assert!(compare_dirs(source, destination));
+        assert_eq!(compare_dirs(source, destination), Status::Passed);
     }
 
     #[test]
@@ -485,7 +561,7 @@ mod tests {
             sync_files(&chunk, &source, &destination, &None, true, false);
         });
 
-        assert!(compare_dirs(source, destination));
+        assert_eq!(compare_dirs(source, destination), Status::Passed);
     }
 
     #[test]
@@ -520,7 +596,7 @@ mod tests {
             sync_files(&chunk, &source, &destination, &None, true, false);
         });
 
-        assert!(compare_dirs(source, destination));
+        assert_eq!(compare_dirs(source, destination), Status::Passed);
     }
 
     #[test]
@@ -555,7 +631,7 @@ mod tests {
             sync_files(&chunk, &source, &destination, &None, true, false);
         });
 
-        assert!(compare_dirs(source, destination));
+        assert_eq!(compare_dirs(source, destination), Status::Passed);
     }
 
     #[test]
@@ -590,6 +666,6 @@ mod tests {
             sync_files(&chunk, &source, &destination, &None, true, false);
         });
 
-        assert!(compare_dirs(source, destination));
+        assert_eq!(compare_dirs(source, destination), Status::Passed);
     }
 }

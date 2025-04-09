@@ -5,6 +5,7 @@ edition = "2021"
 description = "A parallel file synchronizer"
 
 [dependencies]
+ascii_table = "4.0.6"
 clap = { version = "4.5.31", features = ["derive"] }
 env_logger = "0.11.6"
 indicatif = "0.17.11"

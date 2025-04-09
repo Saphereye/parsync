@@ -1,14 +1,15 @@
+use ascii_table::{Align, AsciiTable};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, error};
+use log::{debug, error, info};
 use rayon::prelude::*;
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use std::fmt::Display;
 use std::fs::{self, File};
 use std::io::Read;
 use std::num::NonZeroUsize;
 use std::ops::Not;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -220,11 +221,15 @@ struct Args {
     /// Enables diffing of source and destination directories
     #[arg(long)]
     diff: bool,
+
+    /// Enables diagnostics for the program
+    #[arg(long)]
+    diagnostics: bool,
 }
 
-fn u64_to_human_readable(size: u64) -> String {
+fn size_to_human_readable(size: f64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
-    let mut size = size as f64;
+    let mut size = size;
     let mut unit = 0;
     while size >= 1024.0 {
         size /= 1024.0;
@@ -363,7 +368,7 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) -> Status {
         //{
         //    if src_meta.mode() != dest_meta.mode() {
         //        status = Status::Failed;
-        //        eprintln!(
+        //        info!(
         //            "PERMISSION MISMATCH: {:?} (src: {:o}, dest: {:o})",
         //            file,
         //            src_meta.mode(),
@@ -429,7 +434,11 @@ fn main() {
     builder.filter_level(log::LevelFilter::Error); // Show errors by default
 
     if args.verbose {
-        builder.filter_level(log::LevelFilter::Debug); // Enable debug logs if verbose is set
+        builder.filter_level(log::LevelFilter::Debug);
+    }
+
+    if args.diagnostics {
+        builder.filter_level(log::LevelFilter::Info);
     }
 
     builder.init();
@@ -445,13 +454,13 @@ fn main() {
 
     let mut files = get_file_list(&source, args.include, args.exclude);
     let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
-    debug!(
+    info!(
         "Found {} files, with total size relevant files: {}",
         files.len(),
-        u64_to_human_readable(total_size)
+        size_to_human_readable(total_size as f64)
     );
     let num_threads = args.threads;
-    debug!("Using {} threads for the process", num_threads);
+    info!("Using {} threads for the process", num_threads);
 
     // Sort files by size (largest first) for better distribution
     debug!("Sorting file by sizes");
@@ -470,6 +479,85 @@ fn main() {
             .unwrap();
         chunks[min_index].push((file, size));
         chunk_sizes[min_index] += size;
+    }
+
+    if args.diagnostics {
+        let mut max_size = 0;
+        let mut min_size = u64::MAX;
+        let mut total = 0;
+        let mut all_sizes = vec![];
+        let mut rows: Vec<Vec<Box<dyn Display>>> = Vec::new();
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let sizes: Vec<u64> = chunk.iter().map(|(_, size)| *size).collect();
+            let file_count = sizes.len();
+            let chunk_size: u64 = sizes.iter().sum();
+            let avg_size = if file_count > 0 {
+                chunk_size as f64 / file_count as f64
+            } else {
+                0.0
+            };
+            let std_dev = if file_count > 1 {
+                let variance = sizes
+                    .iter()
+                    .map(|s| {
+                        let diff = *s as f64 - avg_size;
+                        diff * diff
+                    })
+                    .sum::<f64>()
+                    / (file_count as f64 - 1.0);
+                variance.sqrt()
+            } else {
+                0.0
+            };
+
+            rows.push(vec![
+                Box::new(i),
+                Box::new(file_count),
+                Box::new(size_to_human_readable(chunk_size as f64)),
+                Box::new(size_to_human_readable(avg_size as f64)),
+                Box::new(size_to_human_readable(std_dev as f64)),
+            ]);
+
+            max_size = max_size.max(chunk_size);
+            min_size = min_size.min(chunk_size);
+            total += chunk_size;
+            all_sizes.push(chunk_size);
+        }
+
+        // Print table
+        let mut table = AsciiTable::default();
+        table.set_max_width(100);
+        table.column(0).set_header("Thread").set_align(Align::Right);
+        table.column(1).set_header("Files").set_align(Align::Right);
+        table
+            .column(2)
+            .set_header("Total Size")
+            .set_align(Align::Right);
+        table
+            .column(3)
+            .set_header("Average")
+            .set_align(Align::Right);
+        table
+            .column(4)
+            .set_header("Std Dev")
+            .set_align(Align::Right);
+
+        table.print(rows);
+        let avg_chunk_size = total as f64 / num_threads as f64;
+        info!("Total Size: {:>10}", size_to_human_readable(total as f64));
+        info!(
+            "Min Chunk Size: {:>10}",
+            size_to_human_readable(min_size as f64)
+        );
+        info!(
+            "Max Chunk Size: {:>10}",
+            size_to_human_readable(max_size as f64)
+        );
+        info!(
+            "Imbalance Ratio (max/avg): {:.2}",
+            max_size as f64 / avg_chunk_size
+        );
     }
 
     debug!("Setting the progress bar");

@@ -11,6 +11,7 @@ use std::io::Read;
 use std::num::NonZeroUsize;
 use std::ops::Not;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use walkdir::WalkDir;
 
 /// Get list of all files with their sizes
@@ -94,11 +95,20 @@ fn sync_files(
     let dest_arc = destination.to_path_buf();
 
     files.par_iter().for_each(|(file, size)| {
-        let rel_path = file.strip_prefix(&src_arc).unwrap();
-        let dest_file = dest_arc.join(rel_path);
+        let rel_path = match file.strip_prefix(&src_arc) {
+            Ok(path) => path,
+            Err(e) => {
+                error!("Failed to strip prefix from {:?}: {}", file, e);
+                return;
+            }
+        };
 
-        // Ensure destination directory exists
-        if let Some(parent) = dest_file.parent() {
+        let src_file = src_arc.join(rel_path);
+        let dest_file = dest_arc.join(rel_path);
+        let dest_parent = dest_file.parent();
+
+        // Ensure parent directory exists
+        if let Some(parent) = dest_parent {
             if dry_run {
                 debug!("Dry-run: Would create directory {:?}", parent);
             } else if let Err(e) = fs::create_dir_all(parent) {
@@ -107,76 +117,41 @@ fn sync_files(
             }
         }
 
-        // Handle empty directories
-        if size == &0 && file.is_dir() {
-            if dry_run {
-                debug!("Dry-run: Would create empty directory {:?}", dest_file);
-            } else if let Err(e) = fs::create_dir_all(&dest_file) {
-                error!("Failed to create directory {:?}: {}", dest_file, e);
-            } else {
-                debug!("Created directory {:?}", dest_file);
-            }
-            return;
+        let mut cmd = Command::new("rsync");
+
+        cmd.arg("-a") // archive mode (preserves links, permissions, etc.)
+           .arg("--relative") // preserve path structure
+           .arg("--no-inc-recursive"); // performance boost for single files
+
+        if dry_run {
+            cmd.arg("--dry-run");
         }
 
-        // Check if file needs copying
-        if no_verify && dest_file.exists() {
-            let src_hash = file_checksum(file);
-            let dest_hash = file_checksum(&dest_file);
-            if src_hash == dest_hash {
+        if !no_verify {
+            cmd.arg("--checksum");
+        }
+
+        // Add source and destination paths
+        // Prefix `./` for --relative to preserve directory layout
+        let relative_src = Path::new(".").join(rel_path);
+        cmd.arg(relative_src.to_string_lossy().to_string())
+           .arg(dest_arc.to_string_lossy().to_string())
+           .current_dir(&src_arc);
+
+        debug!("Running rsync: {:?}", cmd);
+
+        match cmd.status() {
+            Ok(status) if status.success() => {
                 if let Some(pb) = pb {
                     pb.inc(*size);
                 }
-                debug!("Skipping {:?}, checksums match", file);
-                return;
-            } else {
-                debug!(
-                    "Checksums do not match for {:?}: {:?} != {:?}",
-                    file, src_hash, dest_hash
-                );
             }
-        }
-
-        // Copy file
-        if dry_run {
-            debug!("Dry-run: Would copy {:?} to {:?}", file, dest_file);
-        } else if file
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            if let Ok(target) = fs::read_link(file) {
-                if dry_run {
-                    debug!(
-                        "Dry-run: Would create symlink {:?} -> {:?}",
-                        dest_file, target
-                    );
-                } else if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
-                    error!(
-                        "Failed to create symlink {:?} -> {:?}: {}",
-                        dest_file, target, e
-                    );
-                }
-            } else {
-                // Handle broken symlinks
-                if dry_run {
-                    debug!(
-                        "Dry-run: Would create broken symlink {:?} -> {:?}",
-                        dest_file, file
-                    );
-                } else if let Err(e) = std::os::unix::fs::symlink(file, &dest_file) {
-                    error!(
-                        "Failed to create broken symlink {:?} -> {:?}: {}",
-                        dest_file, file, e
-                    );
-                }
+            Ok(status) => {
+                error!("rsync failed for {:?} → {:?}: exit code {}", src_file, dest_file, status);
             }
-        } else if let Err(e) = fs::copy(file, &dest_file) {
-            error!("Failed to copy {:?}: {}", file, e);
-        }
-
-        if let Some(pb) = pb {
-            pb.inc(*size);
+            Err(e) => {
+                error!("Failed to execute rsync for {:?}: {}", src_file, e);
+            }
         }
     });
 }

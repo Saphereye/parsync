@@ -1,10 +1,11 @@
 use ascii_table::{Align, AsciiTable};
+use blake3;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info};
 use rayon::prelude::*;
 use regex::Regex;
-use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fs::{self, File};
 use std::io::Read;
@@ -66,10 +67,10 @@ fn get_file_list(
         .collect()
 }
 
-/// Compute SHA-256 hash of a file (optional integrity check)
+/// Compute Blake3 hash of a file (optional integrity check)
 fn file_checksum(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
     let mut buffer = [0; 8192];
 
     while let Ok(n) = file.read(&mut buffer) {
@@ -78,7 +79,7 @@ fn file_checksum(path: &Path) -> Option<String> {
         }
         hasher.update(&buffer[..n]);
     }
-    Some(format!("{:x}", hasher.finalize()))
+    Some(hasher.finalize().to_hex().to_string())
 }
 
 /// Copy files in parallel, considering size-based progress
@@ -256,66 +257,50 @@ impl Not for Status {
 }
 
 fn compare_dirs(src: &Path, dest: &Path) -> Status {
-    let mut src_files_paths: Vec<_> = WalkDir::new(src)
+    let src_files_paths: HashSet<_> = WalkDir::new(src)
         .into_iter()
         .filter_map(Result::ok)
-        .map(|e| e.path().strip_prefix(src).unwrap().to_path_buf()) // Strip src itself
-        //.map(|p| strip_top_level(&p)) // Strip the first component
+        .map(|e| e.path().strip_prefix(src).unwrap().to_path_buf())
         .collect();
 
-    let mut dest_files_paths: Vec<_> = WalkDir::new(dest)
+    let dest_files_paths: HashSet<_> = WalkDir::new(dest)
         .into_iter()
         .filter_map(Result::ok)
-        .map(|e| e.path().strip_prefix(dest).unwrap().to_path_buf()) // Strip dest itself
-        //.map(|p| strip_top_level(&p)) // Strip the first component
+        .map(|e| e.path().strip_prefix(dest).unwrap().to_path_buf())
         .collect();
-
-    // Sort both lists for linear traversal
-    src_files_paths.sort();
-    dest_files_paths.sort();
 
     let mut status = Status::Passed;
 
-    let (mut i, mut j) = (0, 0);
+    // Find files that are only in src or dest
+    let missing: Vec<_> = src_files_paths.difference(&dest_files_paths).collect();
+    let extra: Vec<_> = dest_files_paths.difference(&src_files_paths).collect();
+    let common: Vec<_> = src_files_paths.intersection(&dest_files_paths).collect();
 
-    while i < src_files_paths.len() || j < dest_files_paths.len() {
-        match (src_files_paths.get(i), dest_files_paths.get(j)) {
-            (Some(src_file_path), Some(dest_file_path)) => {
-                match src_file_path.cmp(dest_file_path) {
-                    std::cmp::Ordering::Less => {
-                        status = Status::Failed;
-                        eprintln!("MISSING in dest: {:?}", src_file_path);
-                        i += 1;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        status = Status::Failed;
-                        eprintln!("EXTRA in dest: {:?}", dest_file_path);
-                        j += 1;
-                    }
-                    std::cmp::Ordering::Equal => {
-                        status =
-                            if compare_file_metadata(src, dest, src_file_path) == Status::Failed {
-                                Status::Failed
-                            } else {
-                                status
-                            };
-                        i += 1;
-                        j += 1;
-                    }
-                }
+    for path in &missing {
+        eprintln!("MISSING in dest: {:?}", path);
+        status = Status::Failed;
+    }
+
+    for path in &extra {
+        eprintln!("EXTRA in dest: {:?}", path);
+        status = Status::Failed;
+    }
+
+    let comparison_results: Vec<_> = common
+        .par_iter()
+        .map(|path| {
+            let result = compare_file_metadata(src, dest, path);
+            if result == Status::Failed {
+                Some(path)
+            } else {
+                None
             }
-            (Some(src_file_path), None) => {
-                status = Status::Failed;
-                eprintln!("MISSING in dest: {:?}", src_file_path);
-                i += 1;
-            }
-            (None, Some(dest_file_path)) => {
-                status = Status::Failed;
-                eprintln!("EXTRA in dest: {:?}", dest_file_path);
-                j += 1;
-            }
-            (None, None) => break,
-        }
+        })
+        .collect();
+
+    for result in comparison_results.into_iter().flatten() {
+        eprintln!("DIFFERENT: {:?}", result);
+        status = Status::Failed;
     }
 
     status
@@ -392,40 +377,24 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) -> Status {
         //}
 
         // Check file content by comparing SHA-256 hashes
-        if let (Ok(src_hash), Ok(dest_hash)) =
-            (compute_sha256(&src_path), compute_sha256(&dest_path))
-        {
-            if src_hash != dest_hash {
+        match (
+            file_checksum(&src_path).ok_or(()),
+            file_checksum(&dest_path).ok_or(()),
+        ) {
+            (Ok(src_hash), Ok(dest_hash)) => {
+                if src_hash != dest_hash {
+                    eprintln!("CHECKSUM MISMATCH: src:{} dest:{}", src_hash, dest_hash);
+                    status = Status::Failed;
+                }
+            }
+            (Err(_), Err(_)) | (Err(_), Ok(_)) | (Ok(_), Err(_)) => {
+                error!("Hashing failed. for src: {:?}, dest: {:?}", src_path, dest_path);
                 status = Status::Failed;
-                eprintln!(
-                    "CONTENT MISMATCH: {:?} (src hash: {}, dest hash: {})",
-                    file, src_hash, dest_hash
-                );
             }
         }
     }
 
     status
-}
-
-fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
-    use sha2::{Digest, Sha256};
-    use std::fs::File;
-    use std::io::{BufReader, Read};
-
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 8192];
-
-    while let Ok(bytes_read) = reader.read(&mut buffer) {
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn main() {

@@ -1,6 +1,6 @@
 [package]
 name = "parsync"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "A parallel file synchronizer"
 
@@ -15,4 +15,3 @@ rayon = "1.10.0"
 regex = "1.11.1"
 tempfile = "3.19.1"
 walkdir = "2.5.0"
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }

@@ -1,5 +1,5 @@
 use ascii_table::{Align, AsciiTable};
-use blake3;
+use blake3::Hasher;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info};
@@ -70,7 +70,7 @@ fn get_file_list(
 /// Compute Blake3 hash of a file (optional integrity check)
 fn file_checksum(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Hasher::new();
     let mut buffer = [0; 8192];
 
     while let Ok(n) = file.read(&mut buffer) {
@@ -298,10 +298,7 @@ fn compare_dirs(src: &Path, dest: &Path) -> Status {
         })
         .collect();
 
-    for result in comparison_results.into_iter().flatten() {
-        eprintln!("DIFFERENT: {:?}", result);
-        status = Status::Failed;
-    }
+    status = comparison_results.iter().fold(status, |acc, &_| acc.not());
 
     status
 }
@@ -320,10 +317,10 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) -> Status {
         if src_meta.len() != dest_meta.len() {
             status = Status::Failed;
             eprintln!(
-                "SIZE MISMATCH: {:?} (src: {} bytes, dest: {} bytes)",
+                "SIZE MISMATCH: {:?} (src: {}, dest: {})",
                 file,
-                src_meta.len(),
-                dest_meta.len()
+                size_to_human_readable(src_meta.len() as f64),
+                size_to_human_readable(dest_meta.len() as f64)
             );
         }
 
@@ -376,19 +373,22 @@ fn compare_file_metadata(src: &Path, dest: &Path, file: &Path) -> Status {
         //    }
         //}
 
-        // Check file content by comparing SHA-256 hashes
+        // Check file content by comparing Blake3 hashes
         match (
             file_checksum(&src_path).ok_or(()),
             file_checksum(&dest_path).ok_or(()),
         ) {
             (Ok(src_hash), Ok(dest_hash)) => {
                 if src_hash != dest_hash {
-                    eprintln!("CHECKSUM MISMATCH: src:{} dest:{}", src_hash, dest_hash);
+                    eprintln!("CHECKSUM MISMATCH: src: {:?}, src checksum: {}, dest: {:?}, dest checksum: {}", src_path, src_hash, dest_path, dest_hash);
                     status = Status::Failed;
                 }
             }
             (Err(_), Err(_)) | (Err(_), Ok(_)) | (Ok(_), Err(_)) => {
-                error!("Hashing failed. for src: {:?}, dest: {:?}", src_path, dest_path);
+                error!(
+                    "Hashing failed. for src: {:?}, dest: {:?}",
+                    src_path, dest_path
+                );
                 status = Status::Failed;
             }
         }

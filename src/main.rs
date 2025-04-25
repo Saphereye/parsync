@@ -17,18 +17,20 @@ use walkdir::WalkDir;
 /// Get list of all files with their sizes
 fn get_file_list(
     source: &Path,
+    destination: Option<&Path>,
     include_regex: Option<String>,
     exclude_regex: Option<String>,
+    no_verify: bool,
 ) -> Vec<(PathBuf, u64)> {
     let include = include_regex.map(|r| Regex::new(&r).unwrap());
     let exclude = exclude_regex.map(|r| Regex::new(&r).unwrap());
+
     WalkDir::new(source)
         .follow_links(true)
         .into_iter()
         .filter_map(Result::ok)
         .par_bridge()
         .filter_map(|e| {
-            debug!("Processing file: {:?}", e.path());
             let path = e.path();
             let path_str = path.to_string_lossy();
 
@@ -36,29 +38,40 @@ fn get_file_list(
             let is_file = e.file_type().is_file();
             let is_dir = e.file_type().is_dir();
             let is_empty_dir = is_dir
-                && path
-                    .read_dir()
-                    .map(|mut i| i.next().is_none())
-                    .unwrap_or(false);
+                && path.read_dir().map(|mut i| i.next().is_none()).unwrap_or(false);
 
-            if (is_file || is_symlink || is_empty_dir)
-                && include
-                    .as_ref()
-                    .map(|r| r.is_match(&path_str))
-                    .unwrap_or(true)
-                && !exclude
-                    .as_ref()
-                    .map(|r| r.is_match(&path_str))
-                    .unwrap_or(false)
+            if !(is_file || is_symlink || is_empty_dir) {
+                return None;
+            }
+
+            if include.as_ref().map(|r| r.is_match(&path_str)).unwrap_or(true)
+                && !exclude.as_ref().map(|r| r.is_match(&path_str)).unwrap_or(false)
             {
+                if !no_verify && is_file {
+                    if let Some(dst_root) = destination {
+                        if let Ok(relative) = path.strip_prefix(source) {
+                            let dst_path = dst_root.join(relative);
+                            if dst_path.exists() {
+                                if let (Some(src_hash), Some(dst_hash)) =
+                                    (file_checksum(path), file_checksum(&dst_path))
+                                {
+                                    if src_hash == dst_hash {
+                                        return None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let size = if is_dir {
                     0
                 } else if is_symlink {
-                    // Use symlink metadata to get the size of the symlink itself
                     fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0)
                 } else {
                     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
                 };
+
                 Some((path.to_path_buf(), size))
             } else {
                 None
@@ -88,7 +101,6 @@ fn sync_files(
     source: &Path,
     destination: &Path,
     pb: &Option<ProgressBar>,
-    no_verify: bool,
     dry_run: bool,
 ) {
     let src_arc = source.to_path_buf();
@@ -118,24 +130,6 @@ fn sync_files(
                 debug!("Created directory {:?}", dest_file);
             }
             return;
-        }
-
-        // Check if file needs copying
-        if no_verify && dest_file.exists() {
-            let src_hash = file_checksum(file);
-            let dest_hash = file_checksum(&dest_file);
-            if src_hash == dest_hash {
-                if let Some(pb) = pb {
-                    pb.inc(*size);
-                }
-                debug!("Skipping {:?}, checksums match", file);
-                return;
-            } else {
-                debug!(
-                    "Checksums do not match for {:?}: {:?} != {:?}",
-                    file, src_hash, dest_hash
-                );
-            }
         }
 
         // Copy file
@@ -421,7 +415,7 @@ fn main() {
         return;
     }
 
-    let mut files = get_file_list(&source, args.include, args.exclude);
+    let mut files = get_file_list(&source, Some(&destination), args.include, args.exclude, args.no_verify);
     let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
     info!(
         "Found {} files, with total size relevant files: {}",
@@ -546,7 +540,6 @@ fn main() {
             &source,
             &destination,
             &Some(pb.clone()),
-            args.no_verify,
             args.dry_run,
         );
     });
@@ -566,7 +559,7 @@ mod tests {
         let source = Path::new("data/simple_files");
         let destination = temp_dest.path();
 
-        let mut files = get_file_list(&source, None, None);
+        let mut files = get_file_list(&source, None, None, None, false);
         let num_threads = std::thread::available_parallelism()
             .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap())
             .get();
@@ -589,7 +582,7 @@ mod tests {
         }
 
         chunks.into_par_iter().for_each(|chunk| {
-            sync_files(&chunk, &source, &destination, &None, true, false);
+            sync_files(&chunk, &source, &destination, &None, false);
         });
 
         assert_eq!(compare_dirs(source, destination), Status::Passed);
@@ -601,7 +594,7 @@ mod tests {
         let source = Path::new("data/hidden_files");
         let destination = temp_dest.path();
 
-        let mut files = get_file_list(&source, None, None);
+        let mut files = get_file_list(&source, None, None, None, true);
         let num_threads = std::thread::available_parallelism()
             .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap())
             .get();
@@ -624,7 +617,7 @@ mod tests {
         }
 
         chunks.into_par_iter().for_each(|chunk| {
-            sync_files(&chunk, &source, &destination, &None, true, false);
+            sync_files(&chunk, &source, &destination, &None, false);
         });
 
         assert_eq!(compare_dirs(source, destination), Status::Passed);

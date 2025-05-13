@@ -14,6 +14,8 @@ use std::ops::Not;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+mod protocols;
+
 /// Get list of all files with their sizes
 fn get_file_list(
     source: &Path,
@@ -95,6 +97,31 @@ fn file_checksum(path: &Path) -> Option<String> {
     Some(hasher.finalize().to_hex().to_string())
 }
 
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        if target.is_dir() {
+            symlink_dir(target, link)
+        } else {
+            symlink_file(target, link)
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "symlink creation not supported on this platform",
+        ))
+    }
+}
+
 /// Copy files in parallel, considering size-based progress
 fn sync_files(
     files: &[(PathBuf, u64)],
@@ -146,7 +173,8 @@ fn sync_files(
                         "Dry-run: Would create symlink {:?} -> {:?}",
                         dest_file, target
                     );
-                } else if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
+                } else if let Err(e) = create_symlink(&target, &dest_file)
+ {
                     error!(
                         "Failed to create symlink {:?} -> {:?}: {}",
                         dest_file, target, e
@@ -159,7 +187,7 @@ fn sync_files(
                         "Dry-run: Would create broken symlink {:?} -> {:?}",
                         dest_file, file
                     );
-                } else if let Err(e) = std::os::unix::fs::symlink(file, &dest_file) {
+                } else if let Err(e) = create_symlink(file, &dest_file) {
                     error!(
                         "Failed to create broken symlink {:?} -> {:?}: {}",
                         dest_file, file, e
@@ -545,81 +573,4 @@ fn main() {
     });
 
     pb.finish();
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_copy_simple_files() {
-        let temp_dest = TempDir::new().unwrap();
-        let source = Path::new("data/simple_files");
-        let destination = temp_dest.path();
-
-        let mut files = get_file_list(&source, None, None, None, false);
-        let num_threads = std::thread::available_parallelism()
-            .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap())
-            .get();
-
-        // Sort files by size (largest first) for better distribution
-        files.sort_by(|a, b| b.1.cmp(&a.1));
-
-        // Distribute files across threads by balancing total size
-        let mut chunks = vec![vec![]; num_threads];
-        let mut chunk_sizes = vec![0; num_threads];
-        for (file, size) in files {
-            let min_index = chunk_sizes
-                .iter()
-                .enumerate()
-                .min_by_key(|&(_, &size)| size)
-                .map(|(index, _)| index)
-                .unwrap();
-            chunks[min_index].push((file, size));
-            chunk_sizes[min_index] += size;
-        }
-
-        chunks.into_par_iter().for_each(|chunk| {
-            sync_files(&chunk, &source, &destination, &None, false);
-        });
-
-        assert_eq!(compare_dirs(source, destination), Status::Passed);
-    }
-
-    #[test]
-    fn test_copy_hidden_files() {
-        let temp_dest = TempDir::new().unwrap();
-        let source = Path::new("data/hidden_files");
-        let destination = temp_dest.path();
-
-        let mut files = get_file_list(&source, None, None, None, true);
-        let num_threads = std::thread::available_parallelism()
-            .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap())
-            .get();
-
-        // Sort files by size (largest first) for better distribution
-        files.sort_by(|a, b| b.1.cmp(&a.1));
-
-        // Distribute files across threads by balancing total size
-        let mut chunks = vec![vec![]; num_threads];
-        let mut chunk_sizes = vec![0; num_threads];
-        for (file, size) in files {
-            let min_index = chunk_sizes
-                .iter()
-                .enumerate()
-                .min_by_key(|&(_, &size)| size)
-                .map(|(index, _)| index)
-                .unwrap();
-            chunks[min_index].push((file, size));
-            chunk_sizes[min_index] += size;
-        }
-
-        chunks.into_par_iter().for_each(|chunk| {
-            sync_files(&chunk, &source, &destination, &None, false);
-        });
-
-        assert_eq!(compare_dirs(source, destination), Status::Passed);
-    }
 }

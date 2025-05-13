@@ -14,7 +14,7 @@ use std::ops::Not;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-mod protocols;
+//mod protocols;
 
 /// Get list of all files with their sizes
 fn get_file_list(

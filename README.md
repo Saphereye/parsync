@@ -45,8 +45,6 @@ The commands used for the above benchmark were:
 - parsync: `parsync -s /path/to/source -d /path/to/destination --threads 12`
 - rsync + parallel: `cd /path/to/source && \ls -1 | parallel -v -j12 "mkdir -p /path/to/destination/{} && rsync -raz {} /path/to/destination/{}"`
 
-Here `in` is the input folder and `out` is the output folder. For the parallel operations 12 threads were used.
-
 ## Usage
 ```bash
 parsync [OPTIONS] --source <SOURCE> --destination <DESTINATION>

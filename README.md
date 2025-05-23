@@ -2,6 +2,24 @@
 This program aims to improve file transfer and copying speeds by leveraging multithreading.
 
 ## Benchmarking
+This test was run on the following system specs:
+| Component | Details                        |
+|-----------|--------------------------------|
+| OS        | Ubuntu 22.04.5 LTS x86_64      |
+| CPU       | Intel(R) Core(TM) i7-10750H (12) @ 5.00 GHz |
+| RAM       | 32 GiB            |
+| Swap       | 2 GiB            |
+| Filesystem       | ext4            |
+
+And, the source folder had the following stats:
+| Metric       | Value         |
+|--------------|---------------|
+| File Count   | 119,847       |
+| Min Size     | 0 bytes       |
+| Max Size     | 1.06 GB       |
+| Mean Size    | 129.94 KB     |
+| Total Size   | 15.48 GiB     |
+
 ### Initial Copy to a New Location
 
 | Command | Mean [s] | Min [s] | Max [s] | Relative |

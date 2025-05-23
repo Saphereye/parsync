@@ -34,7 +34,7 @@ This test highlights the advantage of tools that use checksums or metadata to sk
 | Command | Mean [s] | Min [s] | Max [s] | Relative |
 |:---|---:|---:|---:|---:|
 | `rsync` | 1.011 ± 0.062 | 0.911 | 1.099 | 1.00 |
-| `rsync_parallel` | 1.456 ± 0.327 | 0.729 | 2.056 | 1.44 ± 0.34 |
+| `rsync + parallel` | 1.456 ± 0.327 | 0.729 | 2.056 | 1.44 ± 0.34 |
 | `parsync` | 8.534 ± 0.103 | 8.441 | 8.767 | 8.44 ± 0.53 |
 | `cp` | 28.182 ± 3.025 | 20.980 | 31.180 | 27.88 ± 3.45 |
 

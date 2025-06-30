@@ -1,162 +1,129 @@
 use ascii_table::{Align, AsciiTable};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, info};
+use log::info;
 use rayon::prelude::*;
 use std::fmt::Display;
-use std::num::NonZeroUsize;
-use std::path::{PathBuf};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 mod protocols;
 mod utils;
 
-use crate::protocols::local_protocol::LocalProtocal;
-use crate::protocols::protocol::Protocol;
+use crate::protocols::{sync, LocalProtocol, Source};
+use crate::utils::size_to_human_readable;
 
+/// Clap args
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// Source directory
-    #[arg(short, long, value_name = "SOURCE")]
+    #[arg(short, long)]
     source: String,
 
-    /// Destination directory
-    #[arg(short, long, value_name = "DESTINATION")]
+    #[arg(short, long)]
     destination: String,
 
-    /// Number of threads to use
-    #[arg(short, long, value_name = "THREADS", default_value_t = std::thread::available_parallelism()
+    #[arg(short, long, default_value_t = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap().get()))]
+        .unwrap_or(1))]
     threads: usize,
 
-    /// Disables checksum verification
     #[arg(long)]
     no_verify: bool,
 
-    /// Enables verbose output
     #[arg(long)]
     verbose: bool,
 
-    /// Regex for files/folders to include
-    #[arg(short, long, value_name = "INCLUDE")]
+    #[arg(short, long)]
     include: Option<String>,
 
-    /// Regex for files/folders to exclude
-    #[arg(short, long, value_name = "EXCLUDE")]
+    #[arg(short, long)]
     exclude: Option<String>,
 
-    /// Enables dry-run mode
     #[arg(long)]
     dry_run: bool,
 
-    /// Enables diffing of source and destination directories
-    #[arg(long)]
-    diff: bool,
-
-    /// Enables diagnostics for the program
     #[arg(long)]
     diagnostics: bool,
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let mut builder = env_logger::Builder::new();
-    builder.filter_level(log::LevelFilter::Error); // Show errors by default
 
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(log::LevelFilter::Error);
     if args.verbose {
         builder.filter_level(log::LevelFilter::Debug);
     }
-
     if args.diagnostics {
         builder.filter_level(log::LevelFilter::Info);
     }
-
     builder.init();
-    let source = PathBuf::from(args.source);
-    debug!("Set source as: {:?}", source);
-    let destination = PathBuf::from(args.destination);
-    debug!("Set destination as: {:?}", destination);
 
-    if args.diff {
-        LocalProtocal::compare_dirs(&source, &destination);
-        return;
-    }
+    let source_path = PathBuf::from(args.source);
+    let dest_path = PathBuf::from(args.destination);
 
-    let mut files = LocalProtocal::get_file_list(&source, Some(&destination), args.include, args.exclude, args.no_verify);
-    let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
+    let protocol = LocalProtocol;
+
+    let files = protocol.list_files(
+        &source_path,
+        args.include.as_deref(),
+        args.exclude.as_deref(),
+    )?;
+
+    let total_size: u64 = files.iter().map(|(entry, _)| entry.size).sum();
     info!(
-        "Found {} files, with total size relevant files: {}",
+        "Found {} relevant files, total size: {}",
         files.len(),
-        utils::size_to_human_readable(total_size as f64)
+        size_to_human_readable(total_size as f64)
     );
-    let num_threads = args.threads;
-    info!("Using {} threads for the process", num_threads);
 
-    // Sort files by size (largest first) for better distribution
-    debug!("Sorting file by sizes");
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    // Sort by size for more balanced threading
+    let mut files = files;
+    files.sort_by(|a, b| b.0.size.cmp(&a.0.size));
 
-    // Distribute files across threads by balancing total size
-    debug!("Calculating the data chunks");
-    let mut chunks = vec![vec![]; num_threads];
-    let mut chunk_sizes = vec![0; num_threads];
-    for (file, size) in files {
-        let min_index = chunk_sizes
+    // Divide files into N threads by size
+    let mut chunks = vec![vec![]; args.threads];
+    let mut sizes = vec![0u64; args.threads];
+
+    for (entry, _) in files {
+        let min_i = sizes
             .iter()
             .enumerate()
-            .min_by_key(|&(_, &size)| size)
-            .map(|(index, _)| index)
+            .min_by_key(|(_, &s)| s)
+            .map(|(i, _)| i)
             .unwrap();
-        chunks[min_index].push((file, size));
-        chunk_sizes[min_index] += size;
+        sizes[min_i] += entry.size;
+        chunks[min_i].push(entry);
     }
 
     if args.diagnostics {
-        let mut max_size = 0;
-        let mut min_size = u64::MAX;
-        let mut total = 0;
-        let mut all_sizes = vec![];
-        let mut rows: Vec<Vec<Box<dyn Display>>> = Vec::new();
+        let mut table_rows: Vec<Vec<Box<dyn Display>>> = Vec::new();
 
         for (i, chunk) in chunks.iter().enumerate() {
-            let sizes: Vec<u64> = chunk.iter().map(|(_, size)| *size).collect();
-            let file_count = sizes.len();
-            let chunk_size: u64 = sizes.iter().sum();
-            let avg_size = if file_count > 0 {
-                chunk_size as f64 / file_count as f64
-            } else {
-                0.0
-            };
-            let std_dev = if file_count > 1 {
-                let variance = sizes
-                    .iter()
-                    .map(|s| {
-                        let diff = *s as f64 - avg_size;
-                        diff * diff
-                    })
-                    .sum::<f64>()
-                    / (file_count as f64 - 1.0);
-                variance.sqrt()
+            let sizes: Vec<u64> = chunk.iter().map(|f| f.size).collect();
+            let total = sizes.iter().sum::<u64>();
+            let avg = total as f64 / sizes.len().max(1) as f64;
+            let std_dev = if sizes.len() > 1 {
+                let var = sizes.iter().map(|&s| (s as f64 - avg).powi(2)).sum::<f64>()
+                    / (sizes.len() as f64 - 1.0);
+                var.sqrt()
             } else {
                 0.0
             };
 
-            rows.push(vec![
+            table_rows.push(vec![
                 Box::new(i),
-                Box::new(file_count),
-                Box::new(utils::size_to_human_readable(chunk_size as f64)),
-                Box::new(utils::size_to_human_readable(avg_size)),
-                Box::new(utils::size_to_human_readable(std_dev)),
+                Box::new(sizes.len()),
+                Box::new(size_to_human_readable(total as f64)),
+                Box::new(size_to_human_readable(avg)),
+                Box::new(size_to_human_readable(std_dev)),
             ]);
-
-            max_size = max_size.max(chunk_size);
-            min_size = min_size.min(chunk_size);
-            total += chunk_size;
-            all_sizes.push(chunk_size);
         }
 
-        // Print table
         let mut table = AsciiTable::default();
         table.set_max_width(100);
         table.column(0).set_header("Thread").set_align(Align::Right);
@@ -174,43 +141,23 @@ fn main() {
             .set_header("Std Dev")
             .set_align(Align::Right);
 
-        table.print(rows);
-        let avg_chunk_size = total as f64 / num_threads as f64;
-        info!("Total Size: {:>10}", utils::size_to_human_readable(total as f64));
-        info!(
-            "Min Chunk Size: {:>10}",
-            utils::size_to_human_readable(min_size as f64)
-        );
-        info!(
-            "Max Chunk Size: {:>10}",
-            utils::size_to_human_readable(max_size as f64)
-        );
-        info!(
-            "Imbalance Ratio (max/avg): {:.2}",
-            max_size as f64 / avg_chunk_size
-        );
+        table.print(table_rows);
     }
 
-    debug!("Setting the progress bar");
+    // Setup progress bar
     let pb = ProgressBar::new(total_size);
     pb.set_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) ({bytes_per_sec})",
         )
         .unwrap()
-        .progress_chars("#>-"),
+        .progress_chars("##-"),
     );
 
-    debug!("Sending chunk to parallel processors");
     chunks.into_par_iter().for_each(|chunk| {
-        LocalProtocal::sync_files(
-            &chunk,
-            &source,
-            &destination,
-            &Some(pb.clone()),
-            args.dry_run,
-        );
+        sync(&protocol, &protocol, chunk, args.dry_run, &Some(pb.clone())).unwrap();
     });
 
-    pb.finish();
+    pb.finish_with_message("Done!");
+    Ok(())
 }

@@ -1,319 +1,108 @@
-use crate::utils::size_to_human_readable;
-use crate::{protocols::protocol::Protocol, utils::Status};
+use crate::protocols::traits::{Sink, Source};
+use crate::protocols::Protocol;
+use crate::protocols::metadata::{FileEntry, FileKind, FileMetadata};
 use blake3::Hasher;
-use log::{debug, error};
 use rayon::prelude::*;
 use regex::Regex;
-use std::{collections::HashSet, fs, path::PathBuf};
-use std::{fs::File, io::Read, ops::Not};
+use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
+use std::path::PathBuf;
 use walkdir::WalkDir;
 
-pub struct LocalProtocal;
+pub struct LocalProtocol;
 
-impl LocalProtocal {}
+// Helps to inforce that LocalProtocol implements both Source and Sink traits
+impl Protocol for LocalProtocol {}
 
-impl Protocol<PathBuf> for LocalProtocal {
-    fn get_file_list(
-        source: &PathBuf,
-        destination: Option<&PathBuf>,
-        include_regex: Option<String>,
-        exclude_regex: Option<String>,
-        no_verify: bool,
-    ) -> Vec<(PathBuf, u64)> {
-        let include = include_regex.map(|r| Regex::new(&r).unwrap());
-        let exclude = exclude_regex.map(|r| Regex::new(&r).unwrap());
+impl Source for LocalProtocol {
+    type Path = PathBuf;
 
-        WalkDir::new(source)
+    fn list_files(
+        &self,
+        base: &Self::Path,
+        include_regex: Option<&str>,
+        exclude_regex: Option<&str>,
+    ) -> anyhow::Result<Vec<(FileEntry<Self::Path>, u64)>> {
+        let include = include_regex.map(|r| Regex::new(r).unwrap());
+        let exclude = exclude_regex.map(|r| Regex::new(r).unwrap());
+
+        let files = WalkDir::new(base)
             .follow_links(true)
             .into_iter()
             .filter_map(Result::ok)
             .par_bridge()
-            .filter_map(|e| {
-                let path = e.path();
+            .filter_map(|entry| {
+                let path = entry.path().to_path_buf();
                 let path_str = path.to_string_lossy();
 
-                let is_symlink = e.file_type().is_symlink();
-                let is_file = e.file_type().is_file();
-                let is_dir = e.file_type().is_dir();
-                let is_empty_dir = is_dir
-                    && path
-                        .read_dir()
-                        .map(|mut i| i.next().is_none())
-                        .unwrap_or(false);
+                let is_file = entry.file_type().is_file();
+                let is_symlink = entry.file_type().is_symlink();
+                let is_dir = entry.file_type().is_dir();
 
-                if !(is_file || is_symlink || is_empty_dir) {
+                if !is_file && !is_symlink && !is_dir {
                     return None;
                 }
 
-                if include
+                let include_ok = include
                     .as_ref()
                     .map(|r| r.is_match(&path_str))
-                    .unwrap_or(true)
-                    && !exclude
-                        .as_ref()
-                        .map(|r| r.is_match(&path_str))
-                        .unwrap_or(false)
-                {
-                    if !no_verify && is_file {
-                        if let Some(dst_root) = destination {
-                            if let Ok(relative) = path.strip_prefix(source) {
-                                let dst_path = dst_root.join(relative);
-                                if dst_path.exists() {
-                                    if let (Some(src_hash), Some(dst_hash)) = (
-                                        Self::file_checksum(&path.to_path_buf()),
-                                        Self::file_checksum(&dst_path),
-                                    ) {
-                                        if src_hash == dst_hash {
-                                            return None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    .unwrap_or(true);
+                let exclude_ok = exclude
+                    .as_ref()
+                    .map(|r| !r.is_match(&path_str))
+                    .unwrap_or(true);
 
-                    let size = if is_dir {
-                        0
-                    } else if is_symlink {
-                        fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0)
-                    } else {
-                        fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-                    };
-
-                    Some((path.to_path_buf(), size))
-                } else {
-                    None
+                if !include_ok || !exclude_ok {
+                    return None;
                 }
-            })
-            .collect()
-    }
 
-    fn sync_files(
-        files: &Vec<(PathBuf, u64)>,
-        source: &PathBuf,
-        destination: &PathBuf,
-        pb: &Option<indicatif::ProgressBar>,
-        dry_run: bool,
-    ) {
-        let src_arc = source.to_path_buf();
-        let dest_arc = destination.to_path_buf();
-
-        files.par_iter().for_each(|(file, size)| {
-            let rel_path = file.strip_prefix(&src_arc).unwrap();
-            let dest_file = dest_arc.join(rel_path);
-
-            // Ensure destination directory exists
-            if let Some(parent) = dest_file.parent() {
-                if dry_run {
-                    debug!("Dry-run: Would create directory {:?}", parent);
-                } else if let Err(e) = fs::create_dir_all(parent) {
-                    error!("Failed to create directory {:?}: {}", parent, e);
-                    return;
-                }
-            }
-
-            // Handle empty directories
-            if size == &0 && file.is_dir() {
-                if dry_run {
-                    debug!("Dry-run: Would create empty directory {:?}", dest_file);
-                } else if let Err(e) = fs::create_dir_all(&dest_file) {
-                    error!("Failed to create directory {:?}: {}", dest_file, e);
-                } else {
-                    debug!("Created directory {:?}", dest_file);
-                }
-                return;
-            }
-
-            // Copy file
-            if dry_run {
-                debug!("Dry-run: Would copy {:?} to {:?}", file, dest_file);
-            } else if file
-                .symlink_metadata()
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false)
-            {
-                if let Ok(target) = fs::read_link(file) {
-                    if dry_run {
-                        debug!(
-                            "Dry-run: Would create symlink {:?} -> {:?}",
-                            dest_file, target
-                        );
-                    } else if let Err(e) = Self::create_symlink(&target, &dest_file) {
-                        error!(
-                            "Failed to create symlink {:?} -> {:?}: {}",
-                            dest_file, target, e
-                        );
+                let kind = if is_file {
+                    FileKind::File
+                } else if is_dir {
+                    FileKind::Directory
+                } else if is_symlink {
+                    match fs::read_link(&path) {
+                        Ok(target) => FileKind::Symlink(target),
+                        Err(_) => return None, // skip broken symlinks or unreadable ones
                     }
                 } else {
-                    // Handle broken symlinks
-                    if dry_run {
-                        debug!(
-                            "Dry-run: Would create broken symlink {:?} -> {:?}",
-                            dest_file, file
-                        );
-                    } else if let Err(e) = Self::create_symlink(file, &dest_file) {
-                        error!(
-                            "Failed to create broken symlink {:?} -> {:?}: {}",
-                            dest_file, file, e
-                        );
+                    return None;
+                };
+
+                let size = match &kind {
+                    FileKind::File => fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+                    FileKind::Symlink(_) => {
+                        fs::symlink_metadata(&path).map(|m| m.len()).unwrap_or(0)
                     }
-                }
-            } else if let Err(e) = fs::copy(file, &dest_file) {
-                error!("Failed to copy {:?}: {}", file, e);
-            }
+                    FileKind::Directory => 0,
+                };
 
-            if let Some(pb) = pb {
-                pb.inc(*size);
-            }
-        });
-    }
+                let file_entry = FileEntry { path, kind, size };
 
-    fn compare_dirs(src: &PathBuf, dest: &PathBuf) -> Status {
-        let src_files_paths: HashSet<_> = WalkDir::new(src)
-            .into_iter()
-            .filter_map(Result::ok)
-            .map(|e| e.path().strip_prefix(src).unwrap().to_path_buf())
-            .collect();
-
-        let dest_files_paths: HashSet<_> = WalkDir::new(dest)
-            .into_iter()
-            .filter_map(Result::ok)
-            .map(|e| e.path().strip_prefix(dest).unwrap().to_path_buf())
-            .collect();
-
-        let mut status = Status::Passed;
-
-        // Find files that are only in src or dest
-        let missing: Vec<_> = src_files_paths.difference(&dest_files_paths).collect();
-        let extra: Vec<_> = dest_files_paths.difference(&src_files_paths).collect();
-        let common: Vec<_> = src_files_paths.intersection(&dest_files_paths).collect();
-
-        for path in &missing {
-            eprintln!("MISSING in dest: {:?}", path);
-            status = Status::Failed;
-        }
-
-        for path in &extra {
-            eprintln!("EXTRA in dest: {:?}", path);
-            status = Status::Failed;
-        }
-
-        let comparison_results: Vec<_> = common
-            .par_iter()
-            .map(|path| {
-                let result = Self::compare_file_metadata(src, dest, path);
-                if result == Status::Failed {
-                    Some(path)
-                } else {
-                    None
-                }
+                Some((file_entry, size))
             })
             .collect();
 
-        status = comparison_results.iter().fold(status, |acc, &_| acc.not());
-
-        status
+        Ok(files)
     }
 
-    fn compare_file_metadata(src: &PathBuf, dest: &PathBuf, file: &PathBuf) -> Status {
-        let src_path = src.join(file);
-        let dest_path = dest.join(file);
-
-        let src_meta = fs::symlink_metadata(&src_path).ok();
-        let dest_meta = fs::symlink_metadata(&dest_path).ok();
-
-        let mut status = Status::Passed;
-
-        if let (Some(src_meta), Some(dest_meta)) = (src_meta, dest_meta) {
-            // Check file size
-            if src_meta.len() != dest_meta.len() {
-                status = Status::Failed;
-                eprintln!(
-                    "SIZE MISMATCH: {:?} (src: {}, dest: {})",
-                    file,
-                    size_to_human_readable(src_meta.len() as f64),
-                    size_to_human_readable(dest_meta.len() as f64)
-                );
-            }
-
-            // Check if both are symlinks or not
-            let src_is_symlink = src_meta.file_type().is_symlink();
-            let dest_is_symlink = dest_meta.file_type().is_symlink();
-            if src_is_symlink != dest_is_symlink {
-                status = Status::Failed;
-                eprintln!(
-                    "TYPE MISMATCH: {:?} (src: {}, dest: {})",
-                    file,
-                    if src_is_symlink {
-                        "symlink"
-                    } else {
-                        "regular file"
-                    },
-                    if dest_is_symlink {
-                        "symlink"
-                    } else {
-                        "regular file"
-                    }
-                );
-            }
-
-            //// Check file permissions (Unix only)
-            //#[cfg(unix)]
-            //{
-            //    if src_meta.mode() != dest_meta.mode() {
-            //        status = Status::Failed;
-            //        info!(
-            //            "PERMISSION MISMATCH: {:?} (src: {:o}, dest: {:o})",
-            //            file,
-            //            src_meta.mode(),
-            //            dest_meta.mode()
-            //        );
-            //    }
-            //}
-            //
-            //// Check file permissions (Windows only)
-            //#[cfg(windows)]
-            //{
-            //    if src_meta.permissions().readonly() != dest_meta.permissions().readonly() {
-            //        status = Status::Failed;
-            //        eprintln!(
-            //            "READONLY MISMATCH: {:?} (src: {}, dest: {})",
-            //            file,
-            //            src_meta.permissions().readonly(),
-            //            dest_meta.permissions().readonly()
-            //        );
-            //    }
-            //}
-
-            // Check file content by comparing Blake3 hashes
-            match (
-                Self::file_checksum(&src_path).ok_or(()),
-                Self::file_checksum(&dest_path).ok_or(()),
-            ) {
-                (Ok(src_hash), Ok(dest_hash)) => {
-                    if src_hash != dest_hash {
-                        eprintln!("CHECKSUM MISMATCH: src: {:?}, src checksum: {}, dest: {:?}, dest checksum: {}", src_path, src_hash, dest_path, dest_hash);
-                        status = Status::Failed;
-                    }
-                }
-                (Err(_), Err(_)) | (Err(_), Ok(_)) | (Ok(_), Err(_)) => {
-                    error!(
-                        "Hashing failed. for src: {:?}, dest: {:?}",
-                        src_path, dest_path
-                    );
-                    status = Status::Failed;
-                }
-            }
-        }
-
-        status
+    fn read_file(&self, path: &Self::Path) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
+        Ok(Box::new(File::open(path)?))
     }
 
+    fn get_metadata(&self, path: &Self::Path) -> anyhow::Result<FileMetadata> {
+        let size = fs::metadata(path)?.len();
+        let checksum = Self::file_checksum(path);
+        Ok(FileMetadata { size, checksum })
+    }
+}
+
+impl LocalProtocol {
     fn file_checksum(path: &PathBuf) -> Option<String> {
         let mut file = File::open(path).ok()?;
         let mut hasher = Hasher::new();
         let mut buffer = [0; 8192];
-
         while let Ok(n) = file.read(&mut buffer) {
             if n == 0 {
                 break;
@@ -322,8 +111,43 @@ impl Protocol<PathBuf> for LocalProtocal {
         }
         Some(hasher.finalize().to_hex().to_string())
     }
+}
 
-    fn create_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
+impl Sink for LocalProtocol {
+    type Path = PathBuf;
+
+    fn write_file(
+        &self,
+        path: &Self::Path,
+        reader: &mut dyn Read,
+        _size: u64,
+    ) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        std::io::copy(reader, &mut file)?;
+        Ok(())
+    }
+
+    fn file_exists(&self, path: &Self::Path) -> anyhow::Result<bool> {
+        Ok(path.try_exists()?)
+    }
+
+    fn compare_metadata(&self, path: &Self::Path, meta: &FileMetadata) -> bool {
+        if let Ok(actual_meta) = self.get_metadata(path) {
+            actual_meta.size == meta.size && actual_meta.checksum == meta.checksum
+        } else {
+            false
+        }
+    }
+
+    fn create_symlink(&self, target: &Self::Path, link: &Self::Path) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(target, link)
@@ -346,5 +170,9 @@ impl Protocol<PathBuf> for LocalProtocal {
                 "symlink creation not supported on this platform",
             ))
         }
+    }
+
+    fn create_dir(&self, path: &Self::Path) -> std::io::Result<()> {
+        fs::create_dir_all(path)
     }
 }

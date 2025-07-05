@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Smart Rsync - Intelligent rsync wrapper with optimized parallelization
+Rsync - Intelligent rsync wrapper with optimized parallelization
 """
 
 import argparse
@@ -11,7 +11,7 @@ from typing import List
 
 from rich.console import Console
 
-from .wrapper import SmartRsyncWrapper
+from .wrapper import RsyncWrapper
 
 console = Console()
 
@@ -102,7 +102,7 @@ def main() -> None:
     
     try:
         # Create and run wrapper
-        wrapper = SmartRsyncWrapper(
+        wrapper = RsyncWrapper(
             source=args.source,
             destination=args.destination,
             rsync_args=rsync_args,

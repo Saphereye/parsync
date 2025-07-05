@@ -1,5 +1,5 @@
 """
-Smart Rsync Wrapper - Main wrapper class
+Rsync Wrapper - Main wrapper class
 """
 
 import os
@@ -18,9 +18,8 @@ from .jobs import FileInfo, TransferJob, create_balanced_jobs
 
 console = Console()
 
-
-class SmartRsyncWrapper:
-    """Smart rsync wrapper with intelligent parallelization"""
+class RsyncWrapper:
+    """rsync wrapper with intelligent parallelization"""
     
     def __init__(
         self, 
@@ -38,6 +37,9 @@ class SmartRsyncWrapper:
         
         # Determine if this is a remote transfer
         self.is_remote = self._is_remote_transfer(source, destination)
+
+        if '-z' not in self.rsync_args and self.is_remote:
+            self.rsync_args.append('-z')
         
         # Set optimal thread count
         if max_threads is None:
@@ -197,7 +199,7 @@ class SmartRsyncWrapper:
     
     def run(self) -> bool:
         """Execute the smart rsync transfer"""
-        console.print(f"[green]Smart Rsync Wrapper v0.1.0[/green]")
+        console.print(f"[green]Rsync Wrapper v0.1.0[/green]")
         console.print(f"Source: {self.source}")
         console.print(f"Destination: {self.destination}")
         console.print(f"Remote transfer: {self.is_remote}")

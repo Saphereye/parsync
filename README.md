@@ -1,5 +1,7 @@
 # Parsync
 
+![Demo](./assets/demo.png)
+
 ## To run in development
 ```bash
 uv run parsync --help
@@ -14,11 +16,11 @@ uv tool install .
 ## Usage
 ```bash
 # Basic usage
-smart-rsync /source/ /destination/
+parsync /source/ /destination/
 
 # Advanced options
-smart-rsync -t 4 --chunk-size 200 --rsync-args "-av --exclude=*.tmp" /src/ remote:/dst/
+parsync -t 4 --chunk-size 200 --rsync-args "-av --exclude=*.tmp" /src/ remote:/dst/
 
 # Dry run
-smart-rsync --dry-run /source/ /destination/
+parsync --dry-run /source/ /destination/
 ```

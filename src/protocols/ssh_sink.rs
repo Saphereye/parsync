@@ -1,7 +1,6 @@
 use crate::protocols::sink::Sink;
 use blake3::Hasher;
 use log::error;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -105,49 +104,6 @@ impl Sink for SSHSink {
                 error!("Failed to get hash for {:?}: {}", path, e);
                 None
             }
-        }
-    }
-
-    fn get_file_hashes(&self, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
-        use rayon::prelude::*;
-        
-        paths
-            .par_iter()
-            .filter_map(|path| {
-                self.get_file_hash(path).map(|hash| (path.clone(), hash))
-            })
-            .collect()
-    }
-
-    fn write_file(&self, path: &PathBuf, content: &[u8]) -> std::io::Result<()> {
-        // Create parent directory first
-        if let Some(parent) = path.parent() {
-            self.create_dir(&parent.to_path_buf())?;
-        }
-
-        // Write file via SSH using cat
-        let path_str = path.to_string_lossy();
-        let command = format!("cat > '{}'", path_str);
-        
-        let mut child = Command::new("ssh")
-            .arg(&self.connection_string())
-            .arg(&command)
-            .stdin(std::process::Stdio::piped())
-            .spawn()?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            stdin.write_all(content)?;
-        }
-
-        let status = child.wait()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to write file via SSH",
-            ))
         }
     }
 

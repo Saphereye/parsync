@@ -1,13 +1,11 @@
 use crate::protocols::sink::Sink;
 use crate::protocols::source::Source;
-use crate::utils::Status;
 use indicatif::ProgressBar;
 use log::{debug, error};
 use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
-use std::ops::Not;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -183,7 +181,7 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
     pub fn compare_dirs_local(
         source_root: &PathBuf,
         dest_root: &PathBuf,
-    ) -> Status {
+    ) {
         let src_files_paths: HashSet<_> = WalkDir::new(source_root)
             .into_iter()
             .filter_map(Result::ok)
@@ -196,39 +194,23 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
             .map(|e| e.path().strip_prefix(dest_root).unwrap().to_path_buf())
             .collect();
 
-        let mut status = Status::Passed;
-
         // Find files that are only in src or dest
         let missing: Vec<_> = src_files_paths.difference(&dest_files_paths).collect();
         let extra: Vec<_> = dest_files_paths.difference(&src_files_paths).collect();
         let common: Vec<_> = src_files_paths.intersection(&dest_files_paths).collect();
 
         for path in &missing {
-            eprintln!("MISSING in dest: {:?}", path);
-            status = Status::Failed;
+            error!("MISSING in dest: {:?}", path);
         }
 
         for path in &extra {
-            eprintln!("EXTRA in dest: {:?}", path);
-            status = Status::Failed;
+            error!("EXTRA in dest: {:?}", path);
         }
 
         // Compare common files
-        let comparison_results: Vec<_> = common
-            .par_iter()
-            .map(|path| {
-                let result = Self::compare_file_metadata_local(source_root, dest_root, path);
-                if result == Status::Failed {
-                    Some(path)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        status = comparison_results.iter().fold(status, |acc, &_| acc.not());
-
-        status
+        common.par_iter().for_each(|path| {
+            Self::compare_file_metadata_local(source_root, dest_root, path);
+        });
     }
 
     /// Compare metadata of a single file (for local-to-local only)
@@ -236,7 +218,7 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
         src_root: &PathBuf,
         dest_root: &PathBuf,
         file: &PathBuf,
-    ) -> Status {
+    ) {
         use crate::utils::size_to_human_readable;
 
         let src_path = src_root.join(file);
@@ -245,13 +227,10 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
         let src_meta = fs::symlink_metadata(&src_path).ok();
         let dest_meta = fs::symlink_metadata(&dest_path).ok();
 
-        let mut status = Status::Passed;
-
         if let (Some(src_meta), Some(dest_meta)) = (src_meta, dest_meta) {
             // Check file size
             if src_meta.len() != dest_meta.len() {
-                status = Status::Failed;
-                eprintln!(
+                error!(
                     "SIZE MISMATCH: {:?} (src: {}, dest: {})",
                     file,
                     size_to_human_readable(src_meta.len() as f64),
@@ -263,8 +242,7 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
             let src_is_symlink = src_meta.file_type().is_symlink();
             let dest_is_symlink = dest_meta.file_type().is_symlink();
             if src_is_symlink != dest_is_symlink {
-                status = Status::Failed;
-                eprintln!(
+                error!(
                     "TYPE MISMATCH: {:?} (src: {}, dest: {})",
                     file,
                     if src_is_symlink {
@@ -282,17 +260,16 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
 
             // Check file content by comparing Blake3 hashes
             if !src_is_symlink && src_meta.is_file() {
-                let src_hash = Self::compute_hash_local(&src_path);
-                let dest_hash = Self::compute_hash_local(&dest_path);
+                let src_hash = crate::utils::compute_file_hash(&src_path);
+                let dest_hash = crate::utils::compute_file_hash(&dest_path);
 
                 match (src_hash, dest_hash) {
                     (Some(src_h), Some(dest_h)) => {
                         if src_h != dest_h {
-                            eprintln!(
+                            error!(
                                 "CHECKSUM MISMATCH: src: {:?}, src checksum: {}, dest: {:?}, dest checksum: {}",
                                 src_path, src_h, dest_path, dest_h
                             );
-                            status = Status::Failed;
                         }
                     }
                     _ => {
@@ -300,31 +277,9 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
                             "Hashing failed. for src: {:?}, dest: {:?}",
                             src_path, dest_path
                         );
-                        status = Status::Failed;
                     }
                 }
             }
         }
-
-        status
-    }
-
-    /// Compute hash for a local file
-    fn compute_hash_local(path: &PathBuf) -> Option<String> {
-        use blake3::Hasher;
-        use std::fs::File;
-        use std::io::Read;
-
-        let mut file = File::open(path).ok()?;
-        let mut hasher = Hasher::new();
-        let mut buffer = [0; 8192];
-
-        while let Ok(n) = file.read(&mut buffer) {
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
-        Some(hasher.finalize().to_hex().to_string())
     }
 }

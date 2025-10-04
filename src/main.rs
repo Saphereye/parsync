@@ -1,7 +1,7 @@
 use ascii_table::{Align, AsciiTable};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use std::fmt::Display;
 use std::num::NonZeroUsize;
@@ -134,7 +134,7 @@ fn main() {
             );
         }
         (ProtocolType::SSH, ProtocolType::SSH) => {
-            eprintln!("SSH to SSH synchronization is not yet supported");
+            error!("SSH to SSH synchronization is not yet supported");
             std::process::exit(1);
         }
     }
@@ -176,7 +176,7 @@ fn sync_local_to_ssh(source_spec: &str, dest_spec: &str, args: &Args) {
     let sink_impl = match SSHSink::new(dest_spec) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to parse SSH destination: {}", e);
+            error!("Failed to parse SSH destination: {}", e);
             std::process::exit(1);
         }
     };
@@ -212,7 +212,7 @@ fn sync_ssh_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     let source_impl = match SSHSource::new(source_spec) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to parse SSH source: {}", e);
+            error!("Failed to parse SSH source: {}", e);
             std::process::exit(1);
         }
     };

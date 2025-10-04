@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Abstraction for writing files to a destination location.
@@ -10,21 +9,6 @@ pub trait Sink: Send + Sync {
 
     /// Get the hash of a file, returns None if unavailable
     fn get_file_hash(&self, path: &PathBuf) -> Option<String>;
-
-    /// Get hashes for multiple files (can be optimized for remote sinks)
-    #[allow(dead_code)]
-    fn get_file_hashes(&self, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
-        paths
-            .iter()
-            .filter_map(|path| {
-                self.get_file_hash(path).map(|hash| (path.clone(), hash))
-            })
-            .collect()
-    }
-
-    /// Write file to destination, creates parent directories as needed
-    #[allow(dead_code)]
-    fn write_file(&self, path: &PathBuf, content: &[u8]) -> std::io::Result<()>;
 
     /// Create directory at destination (like mkdir -p)
     fn create_dir(&self, path: &PathBuf) -> std::io::Result<()>;

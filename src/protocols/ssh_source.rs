@@ -1,7 +1,6 @@
 use crate::protocols::source::Source;
 use blake3::Hasher;
 use log::error;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -62,15 +61,6 @@ impl SSHSource {
 }
 
 impl Source for SSHSource {
-    fn list_files(
-        &self,
-        _include_regex: Option<String>,
-        _exclude_regex: Option<String>,
-    ) -> Vec<(PathBuf, u64)> {
-        // This method is not used in the new design
-        vec![]
-    }
-
     fn get_file_hash(&self, path: &PathBuf) -> Option<String> {
         // Use blake3sum or fallback to computing hash locally
         let path_str = path.to_string_lossy();
@@ -106,17 +96,6 @@ impl Source for SSHSource {
                 None
             }
         }
-    }
-
-    fn get_file_hashes(&self, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
-        use rayon::prelude::*;
-        
-        paths
-            .par_iter()
-            .filter_map(|path| {
-                self.get_file_hash(path).map(|hash| (path.clone(), hash))
-            })
-            .collect()
     }
 
     fn read_file(&self, path: &PathBuf) -> std::io::Result<Vec<u8>> {

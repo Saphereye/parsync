@@ -21,6 +21,7 @@ use std::path::PathBuf;
 /// ```
 pub trait Source: Send + Sync {
     /// List all files at the source location that match the given filters
+    #[allow(dead_code)]
     fn list_files(
         &self,
         include_regex: Option<String>,
@@ -36,6 +37,7 @@ pub trait Source: Send + Sync {
     /// 
     /// This method can be overridden for optimized batch operations,
     /// particularly useful for remote sources where network calls can be batched.
+    #[allow(dead_code)]
     fn get_file_hashes(&self, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
         paths
             .iter()

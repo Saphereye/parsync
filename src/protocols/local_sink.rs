@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// Local filesystem sink implementation
 pub struct LocalSink {
+    #[allow(dead_code)]
     root: PathBuf,
 }
 
@@ -15,6 +16,7 @@ impl LocalSink {
         Self { root }
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> &PathBuf {
         &self.root
     }

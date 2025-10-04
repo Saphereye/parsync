@@ -1,17 +1,15 @@
-use crate::utils::size_to_human_readable;
 use crate::{protocols::protocol::Protocol, utils::Status};
-use blake3::Hasher;
-use log::{debug, error};
-use rayon::prelude::*;
-use regex::Regex;
-use std::{collections::HashSet, fs, path::PathBuf};
-use std::{fs::File, io::Read, ops::Not};
-use walkdir::WalkDir;
+use std::path::PathBuf;
 
+/// Legacy SSH protocol implementation - deprecated
+/// Use SSHSource and SSHSink instead
+#[allow(dead_code)]
 pub struct SSHProtocol;
 
+#[allow(dead_code)]
 impl SSHProtocol {}
 
+#[allow(unused_variables)]
 impl Protocol<PathBuf> for SSHProtocol {
     fn get_file_list(
         source: &PathBuf,

@@ -32,6 +32,7 @@ pub trait Sink: Send + Sync {
     /// 
     /// This method can be overridden for optimized batch operations,
     /// particularly useful for remote sinks where network calls can be batched.
+    #[allow(dead_code)]
     fn get_file_hashes(&self, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
         paths
             .iter()
@@ -44,6 +45,7 @@ pub trait Sink: Send + Sync {
     /// Write a file to the destination.
     /// 
     /// This method should create parent directories as needed.
+    #[allow(dead_code)]
     fn write_file(&self, path: &PathBuf, content: &[u8]) -> std::io::Result<()>;
 
     /// Create a directory at the destination.

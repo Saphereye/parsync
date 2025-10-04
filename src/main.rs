@@ -157,7 +157,7 @@ fn sync_local_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     let sink_impl = LocalSink::new(destination.clone());
     let synchronizer = Synchronizer::new(source_impl, sink_impl);
 
-    let mut files = synchronizer.get_files_to_sync(
+    let files = synchronizer.get_files_to_sync(
         &source,
         &destination,
         args.include.clone(),
@@ -192,7 +192,7 @@ fn sync_local_to_ssh(source_spec: &str, dest_spec: &str, args: &Args) {
     let source_impl = LocalSource::new(source.clone());
     let synchronizer = Synchronizer::new(source_impl, sink_impl);
 
-    let mut files = synchronizer.get_files_to_sync(
+    let files = synchronizer.get_files_to_sync(
         &source,
         &destination,
         args.include.clone(),
@@ -227,7 +227,7 @@ fn sync_ssh_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     let sink_impl = LocalSink::new(destination.clone());
     let synchronizer = Synchronizer::new(source_impl, sink_impl);
 
-    let mut files = synchronizer.get_files_to_sync(
+    let files = synchronizer.get_files_to_sync(
         &source,
         &destination,
         args.include.clone(),

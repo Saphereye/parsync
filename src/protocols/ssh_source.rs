@@ -2,7 +2,6 @@ use crate::protocols::source::Source;
 use blake3::Hasher;
 use log::error;
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -119,9 +118,7 @@ impl Source for SSHSource {
     }
 
     fn read_file(&self, path: &PathBuf) -> std::io::Result<Vec<u8>> {
-        // Use scp to read the file
-        let remote_path = format!("{}:{}", self.connection_string(), path.to_string_lossy());
-        
+        // Use ssh to read the file
         let output = Command::new("ssh")
             .arg(&self.connection_string())
             .arg("cat")

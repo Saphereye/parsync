@@ -1,6 +1,9 @@
 use crate::utils::Status;
 use indicatif::ProgressBar;
 
+/// Legacy Protocol trait - deprecated in favor of Source/Sink abstractions
+/// This trait is kept for backward compatibility but may be removed in future versions
+#[allow(dead_code)]
 pub trait Protocol<PathType>
 where
     PathType: Sized,

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// Local filesystem source implementation
 pub struct LocalSource {
+    #[allow(dead_code)]
     root: PathBuf,
 }
 
@@ -15,6 +16,7 @@ impl LocalSource {
         Self { root }
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> &PathBuf {
         &self.root
     }

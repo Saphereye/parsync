@@ -1,17 +1,46 @@
 use ascii_table::{Align, AsciiTable};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, info};
+use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use std::fmt::Display;
 use std::num::NonZeroUsize;
-use std::path::{PathBuf};
+use std::path::PathBuf;
 
 mod protocols;
 mod utils;
 
-use crate::protocols::local_protocol::LocalProtocal;
-use crate::protocols::protocol::Protocol;
+use crate::protocols::local_sink::LocalSink;
+use crate::protocols::local_source::LocalSource;
+use crate::protocols::ssh_sink::SSHSink;
+use crate::protocols::ssh_source::SSHSource;
+use crate::protocols::synchronizer::Synchronizer;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ProtocolType {
+    Local,
+    SSH,
+}
+
+/// Parse path specification to determine protocol type
+/// 
+/// SSH format: user@host:path
+/// Local format: /path/to/dir or ./relative/path
+fn parse_path_spec(spec: &str) -> (ProtocolType, String) {
+    // Check if it matches SSH format (user@host:path)
+    if spec.contains('@') && spec.contains(':') {
+        let parts: Vec<&str> = spec.split('@').collect();
+        if parts.len() == 2 {
+            let host_path: Vec<&str> = parts[1].split(':').collect();
+            if host_path.len() == 2 {
+                return (ProtocolType::SSH, spec.to_string());
+            }
+        }
+    }
+    
+    // Otherwise it's local
+    (ProtocolType::Local, spec.to_string())
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -73,17 +102,157 @@ fn main() {
     }
 
     builder.init();
-    let source = PathBuf::from(args.source);
+    
+    // Parse source and destination to determine protocol types
+    let (source_proto, source_spec) = parse_path_spec(&args.source);
+    let (dest_proto, dest_spec) = parse_path_spec(&args.destination);
+    
+    debug!("Source: {:?} ({})", source_proto, source_spec);
+    debug!("Destination: {:?} ({})", dest_proto, dest_spec);
+
+    // Handle different protocol combinations
+    match (source_proto, dest_proto) {
+        (ProtocolType::Local, ProtocolType::Local) => {
+            sync_local_to_local(
+                &source_spec,
+                &dest_spec,
+                &args,
+            );
+        }
+        (ProtocolType::Local, ProtocolType::SSH) => {
+            sync_local_to_ssh(
+                &source_spec,
+                &dest_spec,
+                &args,
+            );
+        }
+        (ProtocolType::SSH, ProtocolType::Local) => {
+            sync_ssh_to_local(
+                &source_spec,
+                &dest_spec,
+                &args,
+            );
+        }
+        (ProtocolType::SSH, ProtocolType::SSH) => {
+            error!("SSH to SSH synchronization is not yet supported");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Synchronize from local source to local destination
+fn sync_local_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
+    let source = PathBuf::from(source_spec);
+    let destination = PathBuf::from(dest_spec);
+    
     debug!("Set source as: {:?}", source);
-    let destination = PathBuf::from(args.destination);
     debug!("Set destination as: {:?}", destination);
 
     if args.diff {
-        LocalProtocal::compare_dirs(&source, &destination);
+        info!("Running diff mode for local-to-local sync");
+        Synchronizer::<LocalSource, LocalSink>::compare_dirs_local(&source, &destination);
         return;
     }
 
-    let mut files = LocalProtocal::get_file_list(&source, Some(&destination), args.include, args.exclude, args.no_verify);
+    let source_impl = LocalSource::new(source.clone());
+    let sink_impl = LocalSink::new(destination.clone());
+    let synchronizer = Synchronizer::new(source_impl, sink_impl);
+
+    let files = synchronizer.get_files_to_sync(
+        &source,
+        &destination,
+        args.include.clone(),
+        args.exclude.clone(),
+        args.no_verify,
+    );
+    
+    sync_files_common(files, &source, &destination, args, synchronizer);
+}
+
+/// Synchronize from local source to SSH destination
+fn sync_local_to_ssh(source_spec: &str, dest_spec: &str, args: &Args) {
+    let source = PathBuf::from(source_spec);
+    
+    let sink_impl = match SSHSink::new(dest_spec) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to parse SSH destination: {}", e);
+            std::process::exit(1);
+        }
+    };
+    
+    let destination = sink_impl.root().clone();
+    
+    debug!("Set source as: {:?}", source);
+    debug!("Set destination as: {} (SSH)", dest_spec);
+
+    // Warn about unsupported features for SSH
+    if args.diff {
+        warn!("Diff mode is not supported for SSH destinations, ignoring --diff flag");
+    }
+
+    let source_impl = LocalSource::new(source.clone());
+    let synchronizer = Synchronizer::new(source_impl, sink_impl);
+
+    let files = synchronizer.get_files_to_sync(
+        &source,
+        &destination,
+        args.include.clone(),
+        args.exclude.clone(),
+        args.no_verify,
+    );
+    
+    sync_files_common(files, &source, &destination, args, synchronizer);
+}
+
+/// Synchronize from SSH source to local destination
+fn sync_ssh_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
+    let destination = PathBuf::from(dest_spec);
+    
+    let source_impl = match SSHSource::new(source_spec) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to parse SSH source: {}", e);
+            std::process::exit(1);
+        }
+    };
+    
+    let source = source_impl.root().clone();
+    
+    debug!("Set source as: {} (SSH)", source_spec);
+    debug!("Set destination as: {:?}", destination);
+
+    // Warn about unsupported features for SSH
+    if args.diff {
+        warn!("Diff mode is not supported for SSH sources, ignoring --diff flag");
+    }
+
+    let sink_impl = LocalSink::new(destination.clone());
+    let synchronizer = Synchronizer::new(source_impl, sink_impl);
+
+    let files = synchronizer.get_files_to_sync(
+        &source,
+        &destination,
+        args.include.clone(),
+        args.exclude.clone(),
+        args.no_verify,
+    );
+    
+    sync_files_common(files, &source, &destination, args, synchronizer);
+}
+
+/// Common sync logic for all protocol combinations
+fn sync_files_common<S, D>(
+    mut files: Vec<(PathBuf, u64)>,
+    source: &PathBuf,
+    destination: &PathBuf,
+    args: &Args,
+    synchronizer: Synchronizer<S, D>,
+)
+where
+    S: crate::protocols::source::Source + Send + Sync,
+    D: crate::protocols::sink::Sink + Send + Sync,
+{
     let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
     info!(
         "Found {} files, with total size relevant files: {}",
@@ -203,10 +372,10 @@ fn main() {
 
     debug!("Sending chunk to parallel processors");
     chunks.into_par_iter().for_each(|chunk| {
-        LocalProtocal::sync_files(
+        synchronizer.sync_files(
             &chunk,
-            &source,
-            &destination,
+            source,
+            destination,
             &Some(pb.clone()),
             args.dry_run,
         );

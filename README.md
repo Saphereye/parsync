@@ -1,6 +1,108 @@
 # Parallel file synchronizer
 This program aims to improve file transfer and copying speeds by leveraging multithreading.
 
+## Features
+
+- **Modular Architecture**: Pluggable source and sink abstractions for flexible file synchronization
+- **Multiple Protocol Support**: 
+  - Local filesystem synchronization
+  - SSH-based remote synchronization (both source and destination)
+- **Intelligent Sync**: 
+  - Hash-based file comparison (Blake3)
+  - Only transfers files that are missing or have different hashes
+  - Optimized hash fetching: hashes are computed at destination first, then compared locally at source
+- **High Performance**: 
+  - Parallel file transfers using multiple threads
+  - Smart load balancing across threads
+- **Flexible Filtering**: Include/exclude files using regex patterns
+
+## Usage
+
+### Basic Usage
+
+```bash
+parsync [OPTIONS] --source <SOURCE> --destination <DESTINATION>
+
+Options:
+  -s, --source <SOURCE>            Source directory (local path or user@host:path for SSH)
+  -d, --destination <DESTINATION>  Destination directory (local path or user@host:path for SSH)
+  -t, --threads <THREADS>          Number of threads to use
+      --no-verify                  Disables checksum verification
+      --verbose                    Enables verbose output
+  -i, --include <INCLUDE>          Regex for files/folders to include
+  -e, --exclude <EXCLUDE>          Regex for files/folders to exclude
+      --dry-run                    Enables dry-run mode
+      --diff                       Enables diffing of source and destination directories
+  -h, --help                       Print help
+  -V, --version                    Print version
+```
+
+### Examples
+
+#### Local to Local Sync
+Synchronize files from one local directory to another:
+```bash
+parsync -s /path/to/source -d /path/to/destination
+```
+
+#### Local to Remote SSH Sync
+Push files to a remote server via SSH:
+```bash
+parsync -s /path/to/local/source -d user@remote.host:/path/to/destination
+```
+
+#### Remote SSH to Local Sync
+Pull files from a remote server via SSH:
+```bash
+parsync -s user@remote.host:/path/to/source -d /path/to/local/destination
+```
+
+#### With Filtering
+Sync only specific files using regex:
+```bash
+# Include only .txt files
+parsync -s /source -d /dest -i "\.txt$"
+
+# Exclude .log files
+parsync -s /source -d /dest -e "\.log$"
+
+# Combine include and exclude
+parsync -s /source -d /dest -i "\.txt$" -e "temp"
+```
+
+#### Dry Run Mode
+Preview what would be synchronized without actually copying:
+```bash
+parsync -s /source -d /dest --dry-run --verbose
+```
+
+#### Using Multiple Threads
+Specify the number of parallel threads (default: number of CPU cores):
+```bash
+parsync -s /source -d /dest -t 8
+```
+
+### Hash-Based Synchronization
+
+By default, parsync uses Blake3 hashes to determine which files need to be copied:
+
+1. Files at the destination are hashed first
+2. Hashes are sent to the source for comparison
+3. Only files with different or missing hashes are transferred
+
+This approach:
+- Minimizes unnecessary data transfer
+- Works efficiently for both local and remote destinations
+- Can be disabled with `--no-verify` for faster initial copies
+
+### SSH Configuration
+
+For SSH synchronization:
+- Ensure you have SSH access configured (e.g., via SSH keys)
+- The format is `user@host:path` (colon-separated)
+- Both source and destination can be remote, but at least one should be local
+- Requires `ssh` and `scp` commands available in your PATH
+
 ## Benchmarking
 This test was run on the following system specs:
 | Component | Details                        |

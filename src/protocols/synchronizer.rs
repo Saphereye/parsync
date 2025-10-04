@@ -7,7 +7,45 @@ use regex::Regex;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-/// Synchronizer that works with any Source and Sink implementation
+/// Synchronizer that works with any Source and Sink implementation.
+/// 
+/// This struct orchestrates file synchronization between a source and a sink,
+/// implementing intelligent hash-based comparison to minimize data transfer.
+/// 
+/// # Hash Comparison Strategy
+/// 
+/// The synchronizer implements an optimized hash comparison approach:
+/// 1. List all files at the source
+/// 2. For each file, check if it exists at the destination
+/// 3. If it exists, fetch the hash from the destination
+/// 4. Compare the hash locally at the source
+/// 5. Only include files that are missing or have different hashes
+/// 
+/// This strategy minimizes bandwidth by:
+/// - Fetching only hashes (not file contents) from the destination
+/// - Comparing hashes locally at the source
+/// - Transferring only necessary files
+/// 
+/// # Examples
+/// 
+/// ```ignore
+/// use parsync::protocols::synchronizer::Synchronizer;
+/// use parsync::protocols::local_source::LocalSource;
+/// use parsync::protocols::local_sink::LocalSink;
+/// use std::path::PathBuf;
+/// 
+/// let source = LocalSource::new(PathBuf::from("/source"));
+/// let sink = LocalSink::new(PathBuf::from("/dest"));
+/// let sync = Synchronizer::new(source, sink);
+/// 
+/// let files = sync.get_files_to_sync(
+///     &PathBuf::from("/source"),
+///     &PathBuf::from("/dest"),
+///     None,
+///     None,
+///     false,
+/// );
+/// ```
 pub struct Synchronizer<S: Source, D: Sink> {
     source: S,
     sink: D,

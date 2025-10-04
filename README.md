@@ -1,21 +1,6 @@
 # Parallel file synchronizer
 This program aims to improve file transfer and copying speeds by leveraging multithreading.
 
-## Features
-
-- **Modular Architecture**: Pluggable source and sink abstractions for flexible file synchronization
-- **Multiple Protocol Support**: 
-  - Local filesystem synchronization
-  - SSH-based remote synchronization (both source and destination)
-- **Intelligent Sync**: 
-  - Hash-based file comparison (Blake3)
-  - Only transfers files that are missing or have different hashes
-  - Optimized hash fetching: hashes are computed at destination first, then compared locally at source
-- **High Performance**: 
-  - Parallel file transfers using multiple threads
-  - Smart load balancing across threads
-- **Flexible Filtering**: Include/exclude files using regex patterns
-
 ## Usage
 
 ### Basic Usage

@@ -1,7 +1,7 @@
 use ascii_table::{Align, AsciiTable};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, info};
+use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::fmt::Display;
 use std::num::NonZeroUsize;
@@ -10,10 +10,8 @@ use std::path::PathBuf;
 mod protocols;
 mod utils;
 
-use crate::protocols::local_protocol::LocalProtocal;
 use crate::protocols::local_sink::LocalSink;
 use crate::protocols::local_source::LocalSource;
-use crate::protocols::protocol::Protocol;
 use crate::protocols::ssh_sink::SSHSink;
 use crate::protocols::ssh_source::SSHSource;
 use crate::protocols::synchronizer::Synchronizer;
@@ -24,7 +22,8 @@ enum ProtocolType {
     SSH,
 }
 
-/// Parse a path specification to determine if it's SSH or local
+/// Parse path specification to determine protocol type
+/// 
 /// SSH format: user@host:path
 /// Local format: /path/to/dir or ./relative/path
 fn parse_path_spec(spec: &str) -> (ProtocolType, String) {
@@ -141,6 +140,7 @@ fn main() {
     }
 }
 
+/// Synchronize from local source to local destination
 fn sync_local_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     let source = PathBuf::from(source_spec);
     let destination = PathBuf::from(dest_spec);
@@ -149,7 +149,8 @@ fn sync_local_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     debug!("Set destination as: {:?}", destination);
 
     if args.diff {
-        LocalProtocal::compare_dirs(&source, &destination);
+        info!("Running diff mode for local-to-local sync");
+        Synchronizer::<LocalSource, LocalSink>::compare_dirs_local(&source, &destination);
         return;
     }
 
@@ -168,6 +169,7 @@ fn sync_local_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     sync_files_common(files, &source, &destination, args, synchronizer);
 }
 
+/// Synchronize from local source to SSH destination
 fn sync_local_to_ssh(source_spec: &str, dest_spec: &str, args: &Args) {
     let source = PathBuf::from(source_spec);
     
@@ -184,9 +186,9 @@ fn sync_local_to_ssh(source_spec: &str, dest_spec: &str, args: &Args) {
     debug!("Set source as: {:?}", source);
     debug!("Set destination as: {} (SSH)", dest_spec);
 
+    // Warn about unsupported features for SSH
     if args.diff {
-        eprintln!("Diff mode is not supported for SSH destinations");
-        std::process::exit(1);
+        warn!("Diff mode is not supported for SSH destinations, ignoring --diff flag");
     }
 
     let source_impl = LocalSource::new(source.clone());
@@ -203,6 +205,7 @@ fn sync_local_to_ssh(source_spec: &str, dest_spec: &str, args: &Args) {
     sync_files_common(files, &source, &destination, args, synchronizer);
 }
 
+/// Synchronize from SSH source to local destination
 fn sync_ssh_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     let destination = PathBuf::from(dest_spec);
     
@@ -219,9 +222,9 @@ fn sync_ssh_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     debug!("Set source as: {} (SSH)", source_spec);
     debug!("Set destination as: {:?}", destination);
 
+    // Warn about unsupported features for SSH
     if args.diff {
-        eprintln!("Diff mode is not supported for SSH sources");
-        std::process::exit(1);
+        warn!("Diff mode is not supported for SSH sources, ignoring --diff flag");
     }
 
     let sink_impl = LocalSink::new(destination.clone());
@@ -238,6 +241,7 @@ fn sync_ssh_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     sync_files_common(files, &source, &destination, args, synchronizer);
 }
 
+/// Common sync logic for all protocol combinations
 fn sync_files_common<S, D>(
     mut files: Vec<(PathBuf, u64)>,
     source: &PathBuf,

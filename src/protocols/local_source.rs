@@ -12,6 +12,7 @@ pub struct LocalSource {
 }
 
 impl LocalSource {
+    /// Create a new local source at the given root path
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }

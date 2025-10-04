@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 /// SSH-based source implementation
+/// 
 /// Format: user@host:path
 pub struct SSHSource {
     user: String,
@@ -14,6 +15,7 @@ pub struct SSHSource {
 }
 
 impl SSHSource {
+    /// Parse and create SSH source from connection string (user@host:path)
     pub fn new(connection_string: &str) -> Result<Self, String> {
         // Parse user@host:path format
         let parts: Vec<&str> = connection_string.split('@').collect();

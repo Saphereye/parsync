@@ -1,68 +1,35 @@
 use crate::protocols::sink::Sink;
 use crate::protocols::source::Source;
+use crate::utils::Status;
 use indicatif::ProgressBar;
 use log::{debug, error};
 use rayon::prelude::*;
 use regex::Regex;
+use std::collections::HashSet;
+use std::fs;
+use std::ops::Not;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-/// Synchronizer that works with any Source and Sink implementation.
+/// Orchestrates file synchronization between any Source and Sink.
 /// 
-/// This struct orchestrates file synchronization between a source and a sink,
-/// implementing intelligent hash-based comparison to minimize data transfer.
-/// 
-/// # Hash Comparison Strategy
-/// 
-/// The synchronizer implements an optimized hash comparison approach:
-/// 1. List all files at the source
-/// 2. For each file, check if it exists at the destination
-/// 3. If it exists, fetch the hash from the destination
-/// 4. Compare the hash locally at the source
-/// 5. Only include files that are missing or have different hashes
-/// 
-/// This strategy minimizes bandwidth by:
-/// - Fetching only hashes (not file contents) from the destination
-/// - Comparing hashes locally at the source
-/// - Transferring only necessary files
-/// 
-/// # Examples
-/// 
-/// ```ignore
-/// use parsync::protocols::synchronizer::Synchronizer;
-/// use parsync::protocols::local_source::LocalSource;
-/// use parsync::protocols::local_sink::LocalSink;
-/// use std::path::PathBuf;
-/// 
-/// let source = LocalSource::new(PathBuf::from("/source"));
-/// let sink = LocalSink::new(PathBuf::from("/dest"));
-/// let sync = Synchronizer::new(source, sink);
-/// 
-/// let files = sync.get_files_to_sync(
-///     &PathBuf::from("/source"),
-///     &PathBuf::from("/dest"),
-///     None,
-///     None,
-///     false,
-/// );
-/// ```
+/// Uses optimized hash comparison: fetches hashes from destination,
+/// compares at source, and transfers only necessary files.
 pub struct Synchronizer<S: Source, D: Sink> {
     source: S,
     sink: D,
 }
 
 impl<S: Source, D: Sink> Synchronizer<S, D> {
+    /// Create a new synchronizer with the given source and sink
     pub fn new(source: S, sink: D) -> Self {
         Self { source, sink }
     }
 
     /// Get list of files that need to be synced
-    /// This implements the new hash comparison logic:
-    /// 1. Get list of files from source
-    /// 2. For each file, check if it exists at destination
-    /// 3. If it exists, get hash from destination
-    /// 4. Compare hash at source
-    /// 5. Only include files that are missing or have different hashes
+    /// 
+    /// Fetches hashes from destination, compares at source,
+    /// and returns only files that are missing or have different hashes
     pub fn get_files_to_sync(
         &self,
         source_root: &PathBuf,
@@ -144,7 +111,7 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
         files
     }
 
-    /// Sync files from source to sink
+    /// Sync files from source to sink with parallel execution
     pub fn sync_files(
         &self,
         files: &[(PathBuf, u64)],
@@ -210,5 +177,154 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
                 pb.inc(*size);
             }
         });
+    }
+
+    /// Compare directories and report differences (for local-to-local only)
+    pub fn compare_dirs_local(
+        source_root: &PathBuf,
+        dest_root: &PathBuf,
+    ) -> Status {
+        let src_files_paths: HashSet<_> = WalkDir::new(source_root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|e| e.path().strip_prefix(source_root).unwrap().to_path_buf())
+            .collect();
+
+        let dest_files_paths: HashSet<_> = WalkDir::new(dest_root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|e| e.path().strip_prefix(dest_root).unwrap().to_path_buf())
+            .collect();
+
+        let mut status = Status::Passed;
+
+        // Find files that are only in src or dest
+        let missing: Vec<_> = src_files_paths.difference(&dest_files_paths).collect();
+        let extra: Vec<_> = dest_files_paths.difference(&src_files_paths).collect();
+        let common: Vec<_> = src_files_paths.intersection(&dest_files_paths).collect();
+
+        for path in &missing {
+            eprintln!("MISSING in dest: {:?}", path);
+            status = Status::Failed;
+        }
+
+        for path in &extra {
+            eprintln!("EXTRA in dest: {:?}", path);
+            status = Status::Failed;
+        }
+
+        // Compare common files
+        let comparison_results: Vec<_> = common
+            .par_iter()
+            .map(|path| {
+                let result = Self::compare_file_metadata_local(source_root, dest_root, path);
+                if result == Status::Failed {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        status = comparison_results.iter().fold(status, |acc, &_| acc.not());
+
+        status
+    }
+
+    /// Compare metadata of a single file (for local-to-local only)
+    fn compare_file_metadata_local(
+        src_root: &PathBuf,
+        dest_root: &PathBuf,
+        file: &PathBuf,
+    ) -> Status {
+        use crate::utils::size_to_human_readable;
+
+        let src_path = src_root.join(file);
+        let dest_path = dest_root.join(file);
+
+        let src_meta = fs::symlink_metadata(&src_path).ok();
+        let dest_meta = fs::symlink_metadata(&dest_path).ok();
+
+        let mut status = Status::Passed;
+
+        if let (Some(src_meta), Some(dest_meta)) = (src_meta, dest_meta) {
+            // Check file size
+            if src_meta.len() != dest_meta.len() {
+                status = Status::Failed;
+                eprintln!(
+                    "SIZE MISMATCH: {:?} (src: {}, dest: {})",
+                    file,
+                    size_to_human_readable(src_meta.len() as f64),
+                    size_to_human_readable(dest_meta.len() as f64)
+                );
+            }
+
+            // Check if both are symlinks or not
+            let src_is_symlink = src_meta.file_type().is_symlink();
+            let dest_is_symlink = dest_meta.file_type().is_symlink();
+            if src_is_symlink != dest_is_symlink {
+                status = Status::Failed;
+                eprintln!(
+                    "TYPE MISMATCH: {:?} (src: {}, dest: {})",
+                    file,
+                    if src_is_symlink {
+                        "symlink"
+                    } else {
+                        "regular file"
+                    },
+                    if dest_is_symlink {
+                        "symlink"
+                    } else {
+                        "regular file"
+                    }
+                );
+            }
+
+            // Check file content by comparing Blake3 hashes
+            if !src_is_symlink && src_meta.is_file() {
+                let src_hash = Self::compute_hash_local(&src_path);
+                let dest_hash = Self::compute_hash_local(&dest_path);
+
+                match (src_hash, dest_hash) {
+                    (Some(src_h), Some(dest_h)) => {
+                        if src_h != dest_h {
+                            eprintln!(
+                                "CHECKSUM MISMATCH: src: {:?}, src checksum: {}, dest: {:?}, dest checksum: {}",
+                                src_path, src_h, dest_path, dest_h
+                            );
+                            status = Status::Failed;
+                        }
+                    }
+                    _ => {
+                        error!(
+                            "Hashing failed. for src: {:?}, dest: {:?}",
+                            src_path, dest_path
+                        );
+                        status = Status::Failed;
+                    }
+                }
+            }
+        }
+
+        status
+    }
+
+    /// Compute hash for a local file
+    fn compute_hash_local(path: &PathBuf) -> Option<String> {
+        use blake3::Hasher;
+        use std::fs::File;
+        use std::io::Read;
+
+        let mut file = File::open(path).ok()?;
+        let mut hasher = Hasher::new();
+        let mut buffer = [0; 8192];
+
+        while let Ok(n) = file.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Some(hasher.finalize().to_hex().to_string())
     }
 }

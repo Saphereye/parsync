@@ -12,6 +12,7 @@ pub struct LocalSink {
 }
 
 impl LocalSink {
+    /// Create a new local sink at the given root path
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }

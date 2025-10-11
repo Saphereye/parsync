@@ -14,7 +14,7 @@ fn create_test_files(dir: &TempDir, count: usize, size_mb: usize) {
 fn configure_group(group: &mut BenchmarkGroup<WallTime>) {
     group
         .sample_size(10)  // Reduce sample size for large transfers
-        .measurement_time(Duration::from_secs(60))  // Increase measurement time
+        .measurement_time(Duration::from_secs(60*5))  // Increase measurement time
         .warm_up_time(Duration::from_secs(5));
 }
 

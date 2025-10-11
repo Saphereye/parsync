@@ -1,0 +1,54 @@
+name: Benchmark
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build release binary
+        run: cargo build --release --verbose
+      
+      - name: Run benchmarks
+        run: cargo bench --verbose
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: target/criterion/
+          retention-days: 30
+      
+      - name: Create benchmark summary
+        run: |
+          echo "# Benchmark Results" > benchmark_summary.md
+          echo "" >> benchmark_summary.md
+          echo "Benchmark run completed on $(date)" >> benchmark_summary.md
+          echo "" >> benchmark_summary.md
+          if [ -d "target/criterion" ]; then
+            echo "## Available Reports" >> benchmark_summary.md
+            find target/criterion -name "index.html" | while read file; do
+              dir=$(dirname "$file")
+              name=$(basename "$dir")
+              echo "- $name" >> benchmark_summary.md
+            done
+          fi
+      
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-summary
+          path: benchmark_summary.md

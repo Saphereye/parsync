@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkGroup, measurement::WallTime};
 use std::fs;
 use std::process::Command;
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn create_test_files(dir: &TempDir, count: usize, size_mb: usize) {
@@ -10,8 +11,18 @@ fn create_test_files(dir: &TempDir, count: usize, size_mb: usize) {
     }
 }
 
+fn configure_group(group: &mut BenchmarkGroup<WallTime>) {
+    group
+        .sample_size(10)  // Reduce sample size for large transfers
+        .measurement_time(Duration::from_secs(60))  // Increase measurement time
+        .warm_up_time(Duration::from_secs(5));
+}
+
 fn benchmark_1gb_single_file(c: &mut Criterion) {
-    c.bench_function("1gb_single_file", |b| {
+    let mut group = c.benchmark_group("large_files");
+    configure_group(&mut group);
+    
+    group.bench_function("1gb_single_file", |b| {
         b.iter(|| {
             let source_dir = TempDir::new().unwrap();
             let dest_dir = TempDir::new().unwrap();
@@ -30,10 +41,15 @@ fn benchmark_1gb_single_file(c: &mut Criterion) {
             black_box(output.status.success());
         });
     });
+    
+    group.finish();
 }
 
 fn benchmark_2gb_multiple_files(c: &mut Criterion) {
-    c.bench_function("2gb_multiple_files", |b| {
+    let mut group = c.benchmark_group("large_files");
+    configure_group(&mut group);
+    
+    group.bench_function("2gb_multiple_files", |b| {
         b.iter(|| {
             let source_dir = TempDir::new().unwrap();
             let dest_dir = TempDir::new().unwrap();
@@ -52,10 +68,15 @@ fn benchmark_2gb_multiple_files(c: &mut Criterion) {
             black_box(output.status.success());
         });
     });
+    
+    group.finish();
 }
 
 fn benchmark_5gb_mixed_sizes(c: &mut Criterion) {
-    c.bench_function("5gb_mixed_sizes", |b| {
+    let mut group = c.benchmark_group("large_files");
+    configure_group(&mut group);
+    
+    group.bench_function("5gb_mixed_sizes", |b| {
         b.iter(|| {
             let source_dir = TempDir::new().unwrap();
             let dest_dir = TempDir::new().unwrap();
@@ -77,10 +98,13 @@ fn benchmark_5gb_mixed_sizes(c: &mut Criterion) {
             black_box(output.status.success());
         });
     });
+    
+    group.finish();
 }
 
 fn benchmark_thread_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("thread_scaling");
+    configure_group(&mut group);
     
     for threads in [2, 4, 8] {
         group.bench_function(format!("{}_threads", threads), |b| {

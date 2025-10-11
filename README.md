@@ -83,10 +83,10 @@ This approach:
 ### SSH Configuration
 
 For SSH synchronization:
-- Ensure you have SSH access configured (e.g., via SSH keys)
+- Ensure you have SSH access configured (e.g., via SSH keys or SSH agent)
 - The format is `user@host:path` (colon-separated)
 - Both source and destination can be remote, but at least one should be local
-- Requires `ssh` and `scp` commands available in your PATH
+- Uses the ssh2 library for SSH connections and SFTP for file transfers (no external SSH/SCP commands required)
 
 ## Benchmarking
 This test was run on the following system specs:

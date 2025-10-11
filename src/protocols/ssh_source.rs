@@ -1,20 +1,45 @@
 use crate::protocols::source::Source;
+use crate::protocols::ssh_session::SSHSessionHelper;
 use blake3::Hasher;
 use log::error;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 /// SSH-based source implementation
 /// 
-/// Format: user@host:path
+/// Handles file reading and metadata operations from remote SSH sources using
+/// the ssh2 library. Provides SFTP-based file reading and SSH command execution
+/// for metadata operations.
+/// 
+/// # Format
+/// Connection string format: `user@host:path`
+/// 
+/// # Examples
+/// ```no_run
+/// use parsync::protocols::ssh_source::SSHSource;
+/// 
+/// let source = SSHSource::new("user@example.com:/remote/path").unwrap();
+/// ```
 pub struct SSHSource {
-    user: String,
-    host: String,
     root: PathBuf,
+    session_helper: SSHSessionHelper,
 }
 
 impl SSHSource {
-    /// Parse and create SSH source from connection string (user@host:path)
+    /// Parse and create SSH source from connection string
+    /// 
+    /// # Arguments
+    /// * `connection_string` - SSH connection string in format `user@host:path`
+    /// 
+    /// # Returns
+    /// * `Ok(SSHSource)` - Successfully created SSH source
+    /// * `Err(String)` - Error message if parsing fails
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use parsync::protocols::ssh_source::SSHSource;
+    /// 
+    /// let source = SSHSource::new("user@example.com:/remote/path").unwrap();
+    /// ```
     pub fn new(connection_string: &str) -> Result<Self, String> {
         // Parse user@host:path format
         let parts: Vec<&str> = connection_string.split('@').collect();
@@ -31,32 +56,19 @@ impl SSHSource {
         let host = host_path[0].to_string();
         let root = PathBuf::from(host_path[1]);
         
-        Ok(Self { user, host, root })
+        let session_helper = SSHSessionHelper::new(user, host);
+        
+        Ok(Self { root, session_helper })
     }
 
-    pub fn connection_string(&self) -> String {
-        format!("{}@{}", self.user, self.host)
-    }
-
+    /// Returns the root path on the remote host
     pub fn root(&self) -> &PathBuf {
         &self.root
     }
 
     /// Execute a command on the remote host via SSH
     fn ssh_command(&self, command: &str) -> Result<String, std::io::Error> {
-        let output = Command::new("ssh")
-            .arg(&self.connection_string())
-            .arg(command)
-            .output()?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SSH command failed: {}", String::from_utf8_lossy(&output.stderr)),
-            ))
-        }
+        self.session_helper.execute_command(command)
     }
 }
 
@@ -99,22 +111,8 @@ impl Source for SSHSource {
     }
 
     fn read_file(&self, path: &PathBuf) -> std::io::Result<Vec<u8>> {
-        // Use ssh to read the file
-        let output = Command::new("ssh")
-            .arg(&self.connection_string())
-            .arg("cat")
-            .arg(path.to_string_lossy().as_ref())
-            .stdout(Stdio::piped())
-            .output()?;
-
-        if output.status.success() {
-            Ok(output.stdout)
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to read file: {}", String::from_utf8_lossy(&output.stderr)),
-            ))
-        }
+        // Use SFTP to read the file
+        self.session_helper.read_file(path)
     }
 
     fn is_symlink(&self, path: &PathBuf) -> bool {

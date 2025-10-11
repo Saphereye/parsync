@@ -361,14 +361,19 @@ where
     }
 
     debug!("Setting the progress bar");
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) ({bytes_per_sec})",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
+    let pb = if args.dry_run {
+        None
+    } else {
+        let pb = ProgressBar::new(total_size);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) ({bytes_per_sec})",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+        Some(pb)
+    };
 
     debug!("Sending chunk to parallel processors");
     chunks.into_par_iter().for_each(|chunk| {
@@ -376,10 +381,12 @@ where
             &chunk,
             source,
             destination,
-            &Some(pb.clone()),
+            &pb.as_ref().map(|p| p.clone()),
             args.dry_run,
         );
     });
 
-    pb.finish();
+    if let Some(pb) = pb {
+        pb.finish();
+    }
 }

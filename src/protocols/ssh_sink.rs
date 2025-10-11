@@ -6,16 +6,40 @@ use std::path::PathBuf;
 
 /// SSH-based sink implementation
 /// 
-/// Format: user@host:path
+/// Handles file synchronization to remote SSH destinations using the ssh2 library.
+/// Provides SFTP-based file transfers and SSH command execution for directory
+/// and symlink operations.
+/// 
+/// # Format
+/// Connection string format: `user@host:path`
+/// 
+/// # Examples
+/// ```no_run
+/// use parsync::protocols::ssh_sink::SSHSink;
+/// 
+/// let sink = SSHSink::new("user@example.com:/remote/path").unwrap();
+/// ```
 pub struct SSHSink {
-    user: String,
-    host: String,
     root: PathBuf,
     session_helper: SSHSessionHelper,
 }
 
 impl SSHSink {
-    /// Parse and create SSH sink from connection string (user@host:path)
+    /// Parse and create SSH sink from connection string
+    /// 
+    /// # Arguments
+    /// * `connection_string` - SSH connection string in format `user@host:path`
+    /// 
+    /// # Returns
+    /// * `Ok(SSHSink)` - Successfully created SSH sink
+    /// * `Err(String)` - Error message if parsing fails
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use parsync::protocols::ssh_sink::SSHSink;
+    /// 
+    /// let sink = SSHSink::new("user@example.com:/remote/path").unwrap();
+    /// ```
     pub fn new(connection_string: &str) -> Result<Self, String> {
         // Parse user@host:path format
         let parts: Vec<&str> = connection_string.split('@').collect();
@@ -32,15 +56,12 @@ impl SSHSink {
         let host = host_path[0].to_string();
         let root = PathBuf::from(host_path[1]);
         
-        let session_helper = SSHSessionHelper::new(user.clone(), host.clone());
+        let session_helper = SSHSessionHelper::new(user, host);
         
-        Ok(Self { user, host, root, session_helper })
+        Ok(Self { root, session_helper })
     }
 
-    pub fn connection_string(&self) -> String {
-        format!("{}@{}", self.user, self.host)
-    }
-
+    /// Returns the root path on the remote host
     pub fn root(&self) -> &PathBuf {
         &self.root
     }

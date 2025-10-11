@@ -4,18 +4,34 @@ use std::io::Read;
 use std::net::TcpStream;
 use std::path::Path;
 
-/// SSH session helper to manage connections and execute commands
+/// SSH session helper for managing SSH connections and operations
+/// 
+/// Provides a reusable interface for SSH operations including command execution,
+/// SFTP file transfers, and path operations. Handles authentication via SSH agent
+/// and key files automatically.
 pub struct SSHSessionHelper {
     user: String,
     host: String,
 }
 
 impl SSHSessionHelper {
+    /// Create a new SSH session helper
+    /// 
+    /// # Arguments
+    /// * `user` - SSH username
+    /// * `host` - Remote hostname or IP address
     pub fn new(user: String, host: String) -> Self {
         Self { user, host }
     }
 
-    /// Create a new SSH session
+    /// Create a new SSH session with authentication
+    /// 
+    /// Attempts to authenticate using SSH agent first, then falls back to
+    /// common SSH key file locations if agent authentication fails.
+    /// 
+    /// # Returns
+    /// * `Ok(Session)` - Successfully authenticated SSH session
+    /// * `Err(std::io::Error)` - Connection or authentication failed
     pub fn connect(&self) -> std::io::Result<Session> {
         let tcp = TcpStream::connect(format!("{}:22", self.host))?;
         let mut sess = Session::new().map_err(|e| {
@@ -41,7 +57,7 @@ impl SSHSessionHelper {
             let mut authenticated = false;
             for key_path in key_paths {
                 if Path::new(&key_path).exists() {
-                    if let Ok(_) = sess.userauth_pubkey_file(&self.user, None, Path::new(&key_path), None) {
+                    if sess.userauth_pubkey_file(&self.user, None, Path::new(&key_path), None).is_ok() {
                         authenticated = true;
                         break;
                     }
@@ -60,6 +76,13 @@ impl SSHSessionHelper {
     }
 
     /// Execute a command on the remote host
+    /// 
+    /// # Arguments
+    /// * `command` - Shell command to execute
+    /// 
+    /// # Returns
+    /// * `Ok(String)` - Command output (stdout)
+    /// * `Err(std::io::Error)` - Command execution failed or returned non-zero exit status
     pub fn execute_command(&self, command: &str) -> std::io::Result<String> {
         let sess = self.connect()?;
         let mut channel = sess.channel_session().map_err(|e| {
@@ -93,6 +116,13 @@ impl SSHSessionHelper {
     }
 
     /// Read a file from the remote host using SFTP
+    /// 
+    /// # Arguments
+    /// * `path` - Remote file path
+    /// 
+    /// # Returns
+    /// * `Ok(Vec<u8>)` - File contents
+    /// * `Err(std::io::Error)` - File read failed
     pub fn read_file(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         let sess = self.connect()?;
         let sftp = sess.sftp().map_err(|e| {
@@ -109,6 +139,14 @@ impl SSHSessionHelper {
     }
 
     /// Write a file to the remote host using SFTP
+    /// 
+    /// # Arguments
+    /// * `local_path` - Local file to read
+    /// * `remote_path` - Remote destination path
+    /// 
+    /// # Returns
+    /// * `Ok(())` - File written successfully
+    /// * `Err(std::io::Error)` - File write failed
     pub fn write_file(&self, local_path: &Path, remote_path: &Path) -> std::io::Result<()> {
         let sess = self.connect()?;
         let sftp = sess.sftp().map_err(|e| {
@@ -128,6 +166,13 @@ impl SSHSessionHelper {
     }
 
     /// Check if a file or directory exists on the remote host
+    /// 
+    /// # Arguments
+    /// * `path` - Remote path to check
+    /// 
+    /// # Returns
+    /// * `true` - Path exists
+    /// * `false` - Path does not exist or check failed
     pub fn path_exists(&self, path: &Path) -> bool {
         let sess = match self.connect() {
             Ok(s) => s,
@@ -143,6 +188,15 @@ impl SSHSessionHelper {
     }
 
     /// Create a directory on the remote host using SFTP
+    /// 
+    /// Creates parent directories recursively if they don't exist.
+    /// 
+    /// # Arguments
+    /// * `path` - Remote directory path to create
+    /// 
+    /// # Returns
+    /// * `Ok(())` - Directory created successfully
+    /// * `Err(std::io::Error)` - Directory creation failed
     pub fn create_dir(&self, path: &Path) -> std::io::Result<()> {
         let sess = self.connect()?;
         let sftp = sess.sftp().map_err(|e| {

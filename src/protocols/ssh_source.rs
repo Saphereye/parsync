@@ -6,16 +6,40 @@ use std::path::PathBuf;
 
 /// SSH-based source implementation
 /// 
-/// Format: user@host:path
+/// Handles file reading and metadata operations from remote SSH sources using
+/// the ssh2 library. Provides SFTP-based file reading and SSH command execution
+/// for metadata operations.
+/// 
+/// # Format
+/// Connection string format: `user@host:path`
+/// 
+/// # Examples
+/// ```no_run
+/// use parsync::protocols::ssh_source::SSHSource;
+/// 
+/// let source = SSHSource::new("user@example.com:/remote/path").unwrap();
+/// ```
 pub struct SSHSource {
-    user: String,
-    host: String,
     root: PathBuf,
     session_helper: SSHSessionHelper,
 }
 
 impl SSHSource {
-    /// Parse and create SSH source from connection string (user@host:path)
+    /// Parse and create SSH source from connection string
+    /// 
+    /// # Arguments
+    /// * `connection_string` - SSH connection string in format `user@host:path`
+    /// 
+    /// # Returns
+    /// * `Ok(SSHSource)` - Successfully created SSH source
+    /// * `Err(String)` - Error message if parsing fails
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use parsync::protocols::ssh_source::SSHSource;
+    /// 
+    /// let source = SSHSource::new("user@example.com:/remote/path").unwrap();
+    /// ```
     pub fn new(connection_string: &str) -> Result<Self, String> {
         // Parse user@host:path format
         let parts: Vec<&str> = connection_string.split('@').collect();
@@ -32,15 +56,12 @@ impl SSHSource {
         let host = host_path[0].to_string();
         let root = PathBuf::from(host_path[1]);
         
-        let session_helper = SSHSessionHelper::new(user.clone(), host.clone());
+        let session_helper = SSHSessionHelper::new(user, host);
         
-        Ok(Self { user, host, root, session_helper })
+        Ok(Self { root, session_helper })
     }
 
-    pub fn connection_string(&self) -> String {
-        format!("{}@{}", self.user, self.host)
-    }
-
+    /// Returns the root path on the remote host
     pub fn root(&self) -> &PathBuf {
         &self.root
     }

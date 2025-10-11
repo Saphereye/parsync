@@ -41,7 +41,6 @@ impl SSHSource {
     /// let source = SSHSource::new("user@example.com:/remote/path").unwrap();
     /// ```
     pub fn new(connection_string: &str) -> Result<Self, String> {
-        // Parse user@host:path format
         let parts: Vec<&str> = connection_string.split('@').collect();
         if parts.len() != 2 {
             return Err(format!("Invalid SSH connection string: {}", connection_string));
@@ -74,10 +73,8 @@ impl SSHSource {
 
 impl Source for SSHSource {
     fn get_file_hash(&self, path: &PathBuf) -> Option<String> {
-        // Use blake3sum or fallback to computing hash locally
         let path_str = path.to_string_lossy();
         
-        // Try to compute hash on remote side using a shell command
         let command = format!(
             "if command -v b3sum >/dev/null 2>&1; then b3sum '{}' | cut -d' ' -f1; else echo 'NO_B3SUM'; fi",
             path_str
@@ -87,7 +84,6 @@ impl Source for SSHSource {
             Ok(output) => {
                 let hash = output.trim();
                 if hash == "NO_B3SUM" || hash.is_empty() {
-                    // Fallback: read file and compute hash locally
                     match self.read_file(path) {
                         Ok(content) => {
                             let mut hasher = Hasher::new();
@@ -111,7 +107,6 @@ impl Source for SSHSource {
     }
 
     fn read_file(&self, path: &PathBuf) -> std::io::Result<Vec<u8>> {
-        // Use SFTP to read the file
         self.session_helper.read_file(path)
     }
 

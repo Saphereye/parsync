@@ -41,7 +41,6 @@ impl SSHSink {
     /// let sink = SSHSink::new("user@example.com:/remote/path").unwrap();
     /// ```
     pub fn new(connection_string: &str) -> Result<Self, String> {
-        // Parse user@host:path format
         let parts: Vec<&str> = connection_string.split('@').collect();
         if parts.len() != 2 {
             return Err(format!("Invalid SSH connection string: {}", connection_string));
@@ -80,7 +79,6 @@ impl Sink for SSHSink {
     fn get_file_hash(&self, path: &PathBuf) -> Option<String> {
         let path_str = path.to_string_lossy();
         
-        // Try to compute hash on remote side
         let command = format!(
             "if command -v b3sum >/dev/null 2>&1; then b3sum '{}' | cut -d' ' -f1; else echo 'NO_B3SUM'; fi",
             path_str
@@ -90,7 +88,6 @@ impl Sink for SSHSink {
             Ok(output) => {
                 let hash = output.trim();
                 if hash == "NO_B3SUM" || hash.is_empty() {
-                    // Fallback: read file via SFTP and compute hash locally
                     match self.session_helper.read_file(path) {
                         Ok(content) => {
                             let mut hasher = Hasher::new();
@@ -118,7 +115,6 @@ impl Sink for SSHSink {
     }
 
     fn create_symlink(&self, target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
-        // Create parent directory first
         if let Some(parent) = link.parent() {
             self.create_dir(&parent.to_path_buf())?;
         }
@@ -133,12 +129,10 @@ impl Sink for SSHSink {
     }
 
     fn copy_file(&self, source_path: &PathBuf, dest_path: &PathBuf) -> std::io::Result<()> {
-        // Create parent directory first
         if let Some(parent) = dest_path.parent() {
             self.create_dir(&parent.to_path_buf())?;
         }
 
-        // Use SFTP to copy the file
         self.session_helper.write_file(source_path, dest_path)
     }
 }

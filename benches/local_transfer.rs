@@ -13,8 +13,8 @@ fn create_test_files(dir: &TempDir, count: usize, size_mb: usize) {
 
 fn configure_group(group: &mut BenchmarkGroup<WallTime>) {
     group
-        .sample_size(10)  // Reduce sample size for large transfers
-        .measurement_time(Duration::from_secs(60*5))  // Increase measurement time
+        .sample_size(10)
+        .measurement_time(Duration::from_secs(60))
         .warm_up_time(Duration::from_secs(5));
 }
 
@@ -27,7 +27,6 @@ fn benchmark_1gb_single_file(c: &mut Criterion) {
             let source_dir = TempDir::new().unwrap();
             let dest_dir = TempDir::new().unwrap();
             
-            // Create 1 file of 1GB
             create_test_files(&source_dir, 1, 1024);
             
             let output = Command::new(env!("CARGO_BIN_EXE_parsync"))
@@ -54,7 +53,6 @@ fn benchmark_2gb_multiple_files(c: &mut Criterion) {
             let source_dir = TempDir::new().unwrap();
             let dest_dir = TempDir::new().unwrap();
             
-            // Create 20 files of 100MB each (2GB total)
             create_test_files(&source_dir, 20, 100);
             
             let output = Command::new(env!("CARGO_BIN_EXE_parsync"))
@@ -81,10 +79,7 @@ fn benchmark_5gb_mixed_sizes(c: &mut Criterion) {
             let source_dir = TempDir::new().unwrap();
             let dest_dir = TempDir::new().unwrap();
             
-            // Create mixed file sizes totaling ~5GB
-            // 5 large files (500MB each = 2.5GB)
             create_test_files(&source_dir, 5, 500);
-            // 25 medium files (100MB each = 2.5GB)
             create_test_files(&source_dir, 25, 100);
             
             let output = Command::new(env!("CARGO_BIN_EXE_parsync"))
@@ -112,7 +107,6 @@ fn benchmark_thread_scaling(c: &mut Criterion) {
                 let source_dir = TempDir::new().unwrap();
                 let dest_dir = TempDir::new().unwrap();
                 
-                // Create 2GB of data (20 x 100MB files)
                 create_test_files(&source_dir, 20, 100);
                 
                 let output = Command::new(env!("CARGO_BIN_EXE_parsync"))

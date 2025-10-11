@@ -38,7 +38,6 @@ impl Sink for LocalSink {
     }
 
     fn create_symlink(&self, target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
-        // Ensure parent directory exists
         if let Some(parent) = link.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -68,7 +67,6 @@ impl Sink for LocalSink {
     }
 
     fn copy_file(&self, source_path: &PathBuf, dest_path: &PathBuf) -> std::io::Result<()> {
-        // Ensure parent directory exists
         if let Some(parent) = dest_path.parent() {
             fs::create_dir_all(parent)?;
         }

@@ -42,11 +42,9 @@ impl SSHSessionHelper {
             std::io::Error::new(std::io::ErrorKind::Other, format!("SSH handshake failed: {}", e))
         })?;
 
-        // Try to authenticate using SSH agent first, then fall back to key files
         if let Err(e) = sess.userauth_agent(&self.user) {
             error!("SSH agent authentication failed: {}, trying key files", e);
             
-            // Try common SSH key locations
             let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/root"));
             let key_paths = vec![
                 format!("{}/.ssh/id_rsa", home),
@@ -153,10 +151,8 @@ impl SSHSessionHelper {
             std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to start SFTP: {}", e))
         })?;
         
-        // Read local file
         let contents = std::fs::read(local_path)?;
         
-        // Write to remote file
         let mut remote_file = sftp.create(remote_path).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create remote file: {}", e))
         })?;
@@ -203,16 +199,13 @@ impl SSHSessionHelper {
             std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to start SFTP: {}", e))
         })?;
         
-        // Create directories recursively
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !self.path_exists(parent) {
                 self.create_dir(parent)?;
             }
         }
         
-        // Try to create the directory, ignore error if it already exists
         if let Err(e) = sftp.mkdir(path, 0o755) {
-            // Check if it already exists
             if sftp.stat(path).is_err() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,

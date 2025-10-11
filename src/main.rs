@@ -27,7 +27,6 @@ enum ProtocolType {
 /// SSH format: user@host:path
 /// Local format: /path/to/dir or ./relative/path
 fn parse_path_spec(spec: &str) -> (ProtocolType, String) {
-    // Check if it matches SSH format (user@host:path)
     if spec.contains('@') && spec.contains(':') {
         let parts: Vec<&str> = spec.split('@').collect();
         if parts.len() == 2 {
@@ -38,7 +37,6 @@ fn parse_path_spec(spec: &str) -> (ProtocolType, String) {
         }
     }
     
-    // Otherwise it's local
     (ProtocolType::Local, spec.to_string())
 }
 
@@ -91,7 +89,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
     let mut builder = env_logger::Builder::new();
-    builder.filter_level(log::LevelFilter::Error); // Show errors by default
+    builder.filter_level(log::LevelFilter::Error);
 
     if args.verbose {
         builder.filter_level(log::LevelFilter::Debug);
@@ -103,14 +101,12 @@ fn main() {
 
     builder.init();
     
-    // Parse source and destination to determine protocol types
     let (source_proto, source_spec) = parse_path_spec(&args.source);
     let (dest_proto, dest_spec) = parse_path_spec(&args.destination);
     
     debug!("Source: {:?} ({})", source_proto, source_spec);
     debug!("Destination: {:?} ({})", dest_proto, dest_spec);
 
-    // Handle different protocol combinations
     match (source_proto, dest_proto) {
         (ProtocolType::Local, ProtocolType::Local) => {
             sync_local_to_local(
@@ -186,7 +182,6 @@ fn sync_local_to_ssh(source_spec: &str, dest_spec: &str, args: &Args) {
     debug!("Set source as: {:?}", source);
     debug!("Set destination as: {} (SSH)", dest_spec);
 
-    // Warn about unsupported features for SSH
     if args.diff {
         warn!("Diff mode is not supported for SSH destinations, ignoring --diff flag");
     }
@@ -222,7 +217,6 @@ fn sync_ssh_to_local(source_spec: &str, dest_spec: &str, args: &Args) {
     debug!("Set source as: {} (SSH)", source_spec);
     debug!("Set destination as: {:?}", destination);
 
-    // Warn about unsupported features for SSH
     if args.diff {
         warn!("Diff mode is not supported for SSH sources, ignoring --diff flag");
     }
@@ -262,11 +256,9 @@ where
     let num_threads = args.threads;
     info!("Using {} threads for the process", num_threads);
 
-    // Sort files by size (largest first) for better distribution
     debug!("Sorting file by sizes");
     files.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // Distribute files across threads by balancing total size
     debug!("Calculating the data chunks");
     let mut chunks = vec![vec![]; num_threads];
     let mut chunk_sizes = vec![0; num_threads];
@@ -325,7 +317,6 @@ where
             all_sizes.push(chunk_size);
         }
 
-        // Print table
         let mut table = AsciiTable::default();
         table.set_max_width(100);
         table.column(0).set_header("Thread").set_align(Align::Right);
@@ -361,14 +352,19 @@ where
     }
 
     debug!("Setting the progress bar");
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) ({bytes_per_sec})",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
+    let pb = if args.dry_run {
+        None
+    } else {
+        let pb = ProgressBar::new(total_size);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) ({bytes_per_sec})",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+        Some(pb)
+    };
 
     debug!("Sending chunk to parallel processors");
     chunks.into_par_iter().for_each(|chunk| {
@@ -376,10 +372,12 @@ where
             &chunk,
             source,
             destination,
-            &Some(pb.clone()),
+            &pb.as_ref().map(|p| p.clone()),
             args.dry_run,
         );
     });
 
-    pb.finish();
+    if let Some(pb) = pb {
+        pb.finish();
+    }
 }

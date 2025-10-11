@@ -70,19 +70,14 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
                         .map(|r| r.is_match(&path_str))
                         .unwrap_or(false)
                 {
-                    // New hash comparison logic: fetch hash from destination first
                     if !no_verify && is_file {
                         if let Ok(relative) = path.strip_prefix(source_root) {
                             let dest_path = dest_root.join(relative);
                             
-                            // Check if file exists at destination
                             if self.sink.file_exists(&dest_path) {
-                                // Get hash from destination
                                 if let Some(dest_hash) = self.sink.get_file_hash(&dest_path) {
-                                    // Get hash from source and compare
                                     if let Some(src_hash) = self.source.get_file_hash(&path.to_path_buf()) {
                                         if src_hash == dest_hash {
-                                            // Hashes match, skip this file
                                             return None;
                                         }
                                     }
@@ -122,7 +117,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
             let rel_path = file.strip_prefix(source_root).unwrap();
             let dest_file = dest_root.join(rel_path);
 
-            // Handle empty directories
             if size == &0 && file.is_dir() {
                 if dry_run {
                     debug!("Dry-run: Would create empty directory {:?}", dest_file);
@@ -134,7 +128,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
                 return;
             }
 
-            // Handle symlinks
             if self.source.is_symlink(file) {
                 if let Ok(target) = self.source.read_link(file) {
                     if dry_run {
@@ -149,7 +142,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
                         );
                     }
                 } else {
-                    // Handle broken symlinks
                     if dry_run {
                         debug!(
                             "Dry-run: Would create broken symlink {:?} -> {:?}",
@@ -163,7 +155,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
                     }
                 }
             } else {
-                // Copy regular file
                 if dry_run {
                     debug!("Dry-run: Would copy {:?} to {:?}", file, dest_file);
                 } else if let Err(e) = self.sink.copy_file(file, &dest_file) {
@@ -194,7 +185,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
             .map(|e| e.path().strip_prefix(dest_root).unwrap().to_path_buf())
             .collect();
 
-        // Find files that are only in src or dest
         let missing: Vec<_> = src_files_paths.difference(&dest_files_paths).collect();
         let extra: Vec<_> = dest_files_paths.difference(&src_files_paths).collect();
         let common: Vec<_> = src_files_paths.intersection(&dest_files_paths).collect();
@@ -207,7 +197,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
             error!("EXTRA in dest: {:?}", path);
         }
 
-        // Compare common files
         common.par_iter().for_each(|path| {
             Self::compare_file_metadata_local(source_root, dest_root, path);
         });
@@ -228,7 +217,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
         let dest_meta = fs::symlink_metadata(&dest_path).ok();
 
         if let (Some(src_meta), Some(dest_meta)) = (src_meta, dest_meta) {
-            // Check file size
             if src_meta.len() != dest_meta.len() {
                 error!(
                     "SIZE MISMATCH: {:?} (src: {}, dest: {})",
@@ -238,7 +226,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
                 );
             }
 
-            // Check if both are symlinks or not
             let src_is_symlink = src_meta.file_type().is_symlink();
             let dest_is_symlink = dest_meta.file_type().is_symlink();
             if src_is_symlink != dest_is_symlink {
@@ -258,7 +245,6 @@ impl<S: Source, D: Sink> Synchronizer<S, D> {
                 );
             }
 
-            // Check file content by comparing Blake3 hashes
             if !src_is_symlink && src_meta.is_file() {
                 let src_hash = crate::utils::compute_file_hash(&src_path);
                 let dest_hash = crate::utils::compute_file_hash(&dest_path);

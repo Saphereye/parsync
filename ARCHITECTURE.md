@@ -45,11 +45,13 @@ pub trait Sink: Send + Sync {
 ### SSH Remote
 
 - **SSHSource**: Implements `Source` for remote SSH reads
-  - Uses `ssh` commands to execute remote operations
+  - Uses the `ssh2` library to establish SSH connections
+  - Uses SFTP to read remote files efficiently
   - Falls back to local hash computation if `b3sum` is not available remotely
 - **SSHSink**: Implements `Sink` for remote SSH writes
-  - Uses `scp` for file transfers
-  - Uses `ssh` for directory creation and symlink operations
+  - Uses the `ssh2` library to establish SSH connections
+  - Uses SFTP for file transfers instead of external SCP commands
+  - Uses SSH command execution for directory creation and symlink operations
 
 ## Synchronizer
 

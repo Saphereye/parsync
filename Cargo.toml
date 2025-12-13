@@ -1,6 +1,6 @@
 [package]
 name = "parsync"
-version = "0.2.3"
+version = "0.1.0"
 edition = "2021"
 description = "A parallel file synchronizer"
 
@@ -11,10 +11,17 @@ clap = { version = "4.5.31", features = ["derive"] }
 env_logger = "0.11.6"
 indicatif = "0.17.11"
 log = "0.4.26"
-rayon = "1.10.0"
+crossbeam-channel = "0.5.12"
 regex = "1.11.1"
-tempfile = "3.19.1"
 walkdir = "2.5.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.6"
+
+[dev-dependencies]
+tempfile = "3.19.1"
+criterion = "0.5"
+cargo-husky = { version = "1.5.0", default-features = false, features = ["user-hooks"] }
 
 [profile.release]
 debug = true
@@ -22,6 +29,5 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 opt-level = 3
-strip = "symbols"
 incremental = false
 overflow-checks = false

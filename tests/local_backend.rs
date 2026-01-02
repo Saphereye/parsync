@@ -1,4 +1,4 @@
-use parsync::backends::{LocalBackend, StorageBackend, SyncError};
+use parsync::backends::{LocalBackend, StorageBackend};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -36,6 +36,7 @@ fn test_localbackend_exists() {
 }
 
 #[test]
+/// Verify that LocalBackend::delete removes a single file.
 fn test_localbackend_delete_file() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("delete_me.txt");
@@ -54,6 +55,7 @@ fn test_localbackend_delete_file() {
 }
 
 #[test]
+/// Verify that LocalBackend::delete removes a directory recursively.
 fn test_localbackend_delete_directory() {
     let dir = tempdir().unwrap();
     let subdir_path = dir.path().join("subdir");

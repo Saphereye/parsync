@@ -25,12 +25,30 @@ pub struct FileEntry {
 }
 
 #[allow(dead_code, unused)]
+/// StorageBackend defines the abstract operations over a storage system.
+/// Implementations must be `Send + Sync + Any` and safe to use across threads.
+///
+/// Contract:
+/// - `list`: Return entries for a given path without side effects.
+/// - `get`: Read a file's bytes from the backend.
+/// - `put`: Write bytes to a destination path (create parents as needed).
+/// - `delete`: Remove a file or directory (recursive for directories).
+/// - `exists`: Return whether the path exists.
+/// - `as_any`: Downcast support for concrete backend-specific behavior.
 pub trait StorageBackend: Send + Sync + std::any::Any {
+    /// List files and directories at `path`.
+    /// Returns a vector of `FileEntry` describing the found items.
     fn list(&self, path: &str) -> Result<Vec<FileEntry>, SyncError>;
+    /// Read and return the full contents of the file at `path` as bytes.
     fn get(&self, path: &str) -> Result<Vec<u8>, SyncError>;
+    /// Write `data` to the file at `path`, creating parents if necessary.
     fn put(&self, path: &str, data: &[u8]) -> Result<(), SyncError>;
+    /// Delete the file or directory at `path`. Implementations should handle
+    /// recursive deletion for directories.
     fn delete(&self, path: &str) -> Result<(), SyncError>;
+    /// Return `true` if `path` exists in the backend, `false` otherwise.
     fn exists(&self, path: &str) -> Result<bool, SyncError>;
+    /// Return a `&dyn Any` reference for downcasting to the concrete backend type.
     fn as_any(&self) -> &dyn std::any::Any;
 }
 

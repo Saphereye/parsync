@@ -1,18 +1,23 @@
 #![allow(dead_code)]
 
-//! Parallel chunked file synchronization logic for parsync.
+//! Parallel file synchronization logic for parsync.
 //!
-//! Uses Adler-32 rolling checksums for chunk comparison and only copies changed chunks.
-//! Designed for the case where most contents match (rsync-like).
-//! No cryptographic hash is used for verification (for now).
+//! Current behavior:
+//! - Optimized for local filesystems: uses whole-file copy when a file has changed.
+//! - Fast skip for unchanged files via size + modified time (mtime) comparison.
+//! - Lock-free work sharing: workers pull file jobs via an atomic index (no channels).
+//! - Per-worker cache of created directories to reduce redundant create_dir_all calls.
+//! - Progress bar shows total bytes processed (skips and copies).
+//!
+//! Note:
+//! - Previous Adler-32 rolling checksum logic was removed to reduce CPU overhead.
+//! - For remote or low-bandwidth scenarios, a chunked delta approach can be reintroduced behind a feature flag.
 
 use crate::backends::{StorageBackend, SyncError};
-use adler::Adler32;
-use crossbeam_channel::unbounded;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use walkdir::WalkDir;
@@ -21,32 +26,24 @@ use walkdir::WalkDir;
 pub const DEFAULT_CHUNK_SIZE: usize = 1 << 20;
 pub const LARGE_FILE_THRESHOLD: u64 = 32 * 1024 * 1024; // 32 MiB
 
-/// Represents a chunk job for a file.
-struct ChunkJob {
-    src_path: PathBuf,
-    dst_path: PathBuf,
-    chunk_index: usize,
-    offset: u64,
-    size: usize,
-}
-
 /// Represents a file to sync.
 struct FileJob {
     src_path: PathBuf,
     dst_path: PathBuf,
     size: u64,
+    src_modified: Option<std::time::SystemTime>,
 }
 
-/// Recursively synchronize a directory from source to destination using parallel chunked Adler-32 checksums.
+/// Recursively synchronize a directory from source to destination using parallel workers.
 /// - Creates directories at the destination as needed (including empty ones).
-/// - Syncs files using chunked sync.
-/// - Skips symlinks and special files.
-pub fn sync_dir_chunked(
+/// - Skips unchanged files via size + mtime; performs whole-file copy on change.
+/// - Designed for local filesystems; per-worker directory creation cache reduces overhead.
+pub fn sync(
     _src_backend: Arc<dyn StorageBackend + Send + Sync>,
     src_root: &str,
     _dst_backend: Arc<dyn StorageBackend + Send + Sync>,
     dst_root: &str,
-    chunk_size: usize,
+    _chunk_size: usize,
     no_progress: bool,
 ) -> Result<(), SyncError> {
     let src_root_path = Path::new(src_root);
@@ -71,12 +68,17 @@ pub fn sync_dir_chunked(
                 })?;
             }
         } else if file_type.is_file() {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let meta = entry.metadata();
+            let (size, src_modified) = match meta {
+                Ok(m) => (m.len(), m.modified().ok()),
+                Err(_) => (0, None),
+            };
             total_bytes += size;
             files.push(FileJob {
                 src_path: src_path.to_path_buf(),
                 dst_path,
                 size,
+                src_modified,
             });
         }
     }
@@ -97,201 +99,161 @@ pub fn sync_dir_chunked(
         Some(pb)
     };
 
-    // Producer-consumer model for parallel chunked sync
-    let (job_tx, job_rx) = unbounded();
-    let (done_tx, done_rx) = unbounded();
+    // Parallel work-sharing without channels: atomic index over files; workers update progress directly
+    let files = Arc::new(files);
+    let index = Arc::new(AtomicUsize::new(0));
+    let total_files = files.len();
 
-    // Clone done_tx for producer and workers before moving into threads
-    let producer_done_tx = done_tx.clone();
-
-    // Producer: walk files, enqueue chunk jobs or copy small files directly
-    let producer = {
-        let job_tx = job_tx.clone();
-        thread::spawn(move || {
-            for file in files {
-                // Metadata shortcut: skip hashing/copy if size and mtime match
-                let src_meta = match std::fs::metadata(&file.src_path) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                let dst_meta = std::fs::metadata(&file.dst_path).ok();
-
-                let mut skip = false;
-                if let Some(ref dst_meta) = dst_meta {
-                    if src_meta.len() == dst_meta.len() {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::MetadataExt;
-                            if src_meta.mtime() == dst_meta.mtime()
-                                && src_meta.mtime_nsec() == dst_meta.mtime_nsec()
-                            {
-                                skip = true;
-                            }
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            use std::time::SystemTime;
-                            if let (Ok(src_time), Ok(dst_time)) =
-                                (src_meta.modified(), dst_meta.modified())
-                            {
-                                if src_time == dst_time {
-                                    skip = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if skip {
-                    // File is unchanged, just send a "done" for progress
-                    let _ = producer_done_tx.send(file.size);
-                    continue;
-                }
-
-                // If destination doesn't exist or file is small, copy whole file
-                if dst_meta.is_none() || file.size < LARGE_FILE_THRESHOLD {
-                    match std::fs::copy(&file.src_path, &file.dst_path) {
-                        Ok(copied) => {
-                            let _ = producer_done_tx.send(copied);
-                        }
-                        Err(_) => {
-                            // If copy fails, just send 0
-                            let _ = producer_done_tx.send(0);
-                        }
-                    }
-                    continue;
-                }
-
-                // Otherwise, enqueue chunk jobs for parallel comparison/copy
-                let num_chunks = file.size.div_ceil(chunk_size as u64);
-                for chunk_index in 0..num_chunks {
-                    let offset = chunk_index * chunk_size as u64;
-                    let size = if offset + chunk_size as u64 > file.size {
-                        (file.size - offset) as usize
-                    } else {
-                        chunk_size
-                    };
-                    let job = ChunkJob {
-                        src_path: file.src_path.clone(),
-                        dst_path: file.dst_path.clone(),
-                        chunk_index: chunk_index.try_into().unwrap(),
-                        offset,
-                        size,
-                    };
-                    let _ = job_tx.send(job);
-                }
-            }
-            // Drop sender to signal end of jobs
-            drop(job_tx);
-            drop(producer_done_tx);
-        })
-    };
-
-    // Worker threads: compare/copy chunks in parallel
     let num_threads = num_cpus::get().max(2);
     let mut workers = Vec::new();
+    let pb_shared = pb.clone();
+
     for _ in 0..num_threads {
-        let job_rx = job_rx.clone();
-        let worker_done_tx = done_tx.clone();
+        let files = Arc::clone(&files);
+        let index = Arc::clone(&index);
+        let pb_worker = pb_shared.clone();
         workers.push(thread::spawn(move || {
-            for job in job_rx.iter() {
-                // Read chunk from source
-                let mut src_file = match File::open(&job.src_path) {
-                    Ok(f) => f,
-                    Err(_) => {
-                        let _ = worker_done_tx.send(0);
-                        continue;
+            let mut created_dirs = HashSet::new();
+            loop {
+                let i = index.fetch_add(1, Ordering::Relaxed);
+                if i >= total_files {
+                    break;
+                }
+                let file = &files[i];
+
+                // Quick skip using pre-scanned src modified time + size
+                let dst_meta = std::fs::metadata(&file.dst_path).ok();
+                let mut skipped = false;
+                if let Some(ref dm) = dst_meta {
+                    if file.size == dm.len() {
+                        if let (Some(st), Ok(dt)) = (file.src_modified, dm.modified()) {
+                            if st == dt {
+                                if let Some(ref pb) = pb_worker {
+                                    pb.inc(file.size);
+                                }
+                                skipped = true;
+                            }
+                        }
                     }
-                };
-                let mut src_buf = vec![0u8; job.size];
-                if src_file.seek(SeekFrom::Start(job.offset)).is_err() {
-                    let _ = worker_done_tx.send(0);
+                }
+                if skipped {
                     continue;
                 }
-                let n = match src_file.read(&mut src_buf) {
-                    Ok(n) => n,
-                    Err(_) => {
-                        let _ = worker_done_tx.send(0);
-                        continue;
+
+                // Copy whole file for any changed file (fast path)
+                if let Some(parent) = file.dst_path.parent() {
+                    if !created_dirs.contains(parent) {
+                        let _ = std::fs::create_dir_all(parent);
+                        created_dirs.insert(parent.to_path_buf());
                     }
-                };
-                if n == 0 {
-                    let _ = worker_done_tx.send(0);
-                    continue;
                 }
-
-                // Compute Adler-32 of source chunk
-                let mut src_adler = Adler32::new();
-                src_adler.write_slice(&src_buf[..n]);
-                let src_sum = src_adler.checksum();
-
-                // Try to read chunk from destination
-                let mut dst_file = match OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&job.dst_path)
-                {
-                    Ok(f) => f,
-                    Err(_) => {
-                        // If destination can't be opened, treat as changed
-                        let _ = write_chunk(&job.dst_path, job.offset, &src_buf[..n]);
-                        let _ = worker_done_tx.send(n as u64);
-                        continue;
-                    }
-                };
-                let mut dst_buf = vec![0u8; n];
-                if dst_file.seek(SeekFrom::Start(job.offset)).is_err() {
-                    let _ = write_chunk(&job.dst_path, job.offset, &src_buf[..n]);
-                    let _ = worker_done_tx.send(n as u64);
-                    continue;
-                }
-                let m = dst_file.read(&mut dst_buf).unwrap_or_default();
-
-                // Compute Adler-32 of destination chunk
-                let mut dst_adler = Adler32::new();
-                dst_adler.write_slice(&dst_buf[..m]);
-                let dst_sum = dst_adler.checksum();
-
-                if n != m || src_sum != dst_sum {
-                    // Chunks differ, write source chunk to destination
-                    let _ = write_chunk(&job.dst_path, job.offset, &src_buf[..n]);
-                    let _ = worker_done_tx.send(n as u64);
-                } else {
-                    // Chunks match, just update progress
-                    let _ = worker_done_tx.send(n as u64);
+                let copied =
+                    fast_copy(&file.src_path, &file.dst_path, file.size, file.src_modified);
+                if let Some(ref pb) = pb_worker {
+                    pb.inc(copied);
                 }
             }
         }));
     }
 
-    // Progress bar updater
-    let pb_thread = {
-        let pb = pb.clone();
-        thread::spawn(move || {
-            for n in done_rx.iter() {
-                if let Some(ref pb) = pb {
-                    pb.inc(n);
-                }
-            }
-            if let Some(ref pb) = pb {
-                pb.finish_with_message("Sync complete");
-            }
-        })
-    };
-
-    // Wait for producer and workers to finish
-    let _ = producer.join();
     for w in workers {
         let _ = w.join();
     }
-    let _ = pb_thread.join();
+    if let Some(ref pb) = pb {
+        pb.finish_with_message("Sync complete");
+    }
 
     Ok(())
 }
 
-fn write_chunk(dst_path: &Path, offset: u64, buf: &[u8]) -> std::io::Result<()> {
-    let mut dst_file = OpenOptions::new().write(true).open(dst_path)?;
-    dst_file.seek(SeekFrom::Start(offset))?;
-    dst_file.write_all(buf)?;
-    Ok(())
+#[cfg(target_os = "linux")]
+fn fast_copy(
+    src: &Path,
+    dst: &Path,
+    size: u64,
+    src_modified: Option<std::time::SystemTime>,
+) -> u64 {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+
+    let mut copied_bytes: u64 = 0;
+
+    let src_f = match OpenOptions::new().read(true).open(src) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let dst_f = match OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)
+    {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+
+    unsafe {
+        // Try reflink/clone (FICLONE) first
+        const FICLONE: libc::c_ulong = 0x4004_9409;
+        if libc::ioctl(dst_f.as_raw_fd(), FICLONE, src_f.as_raw_fd()) == 0 {
+            copied_bytes = size;
+        } else {
+            // Try copy_file_range loop
+            let in_fd = src_f.as_raw_fd();
+            let out_fd = dst_f.as_raw_fd();
+            let mut off_in: libc::loff_t = 0;
+            let mut off_out: libc::loff_t = 0;
+            loop {
+                let n = libc::copy_file_range(in_fd, &mut off_in, out_fd, &mut off_out, 1 << 30, 0);
+                if n <= 0 {
+                    break;
+                }
+                copied_bytes = copied_bytes.saturating_add(n as u64);
+                if copied_bytes >= size {
+                    break;
+                }
+            }
+
+            // Fallback to sendfile if nothing copied
+            if copied_bytes == 0 {
+                let mut offset: libc::off_t = 0;
+                loop {
+                    let n = libc::sendfile(out_fd, in_fd, &mut offset, 1 << 30);
+                    if n <= 0 {
+                        break;
+                    }
+                    copied_bytes = copied_bytes.saturating_add(n as u64);
+                    if copied_bytes >= size {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if copied_bytes == 0 {
+        copied_bytes = std::fs::copy(src, dst).unwrap_or(0);
+    }
+
+    if let Some(st) = src_modified {
+        let _ = filetime::set_file_mtime(dst, filetime::FileTime::from_system_time(st));
+    }
+
+    copied_bytes
 }
+
+#[cfg(not(target_os = "linux"))]
+fn fast_copy(
+    src: &Path,
+    dst: &Path,
+    _size: u64,
+    src_modified: Option<std::time::SystemTime>,
+) -> u64 {
+    let copied = std::fs::copy(src, dst).unwrap_or(0);
+    if let Some(st) = src_modified {
+        let _ = filetime::set_file_mtime(dst, filetime::FileTime::from_system_time(st));
+    }
+    copied
+}
+
+// write_chunk removed; writes are performed using the already opened dst_file handle

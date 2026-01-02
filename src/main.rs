@@ -9,17 +9,21 @@ mod utils;
 #[derive(Parser, Debug)]
 #[command(name = "parsync", version, about = "A parallel file synchronizer")]
 struct Cli {
-    /// Number of threads to use (global)
+    /// Number of worker threads to use across operations
     #[arg(short, long, value_name = "THREADS", global = true, default_value_t = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or_else(|_| NonZeroUsize::new(1).unwrap().get()))]
     threads: usize,
 
-    /// Regex for files/folders to include (global)
+    /// Regex pattern to include matching files and directories
     #[arg(short, long, value_name = "INCLUDE", global = true)]
     include: Option<String>,
 
-    /// Regex for files/folders to exclude (global)
+    /// Do not preserve source file modification times on destination copies
+    #[arg(long, global = true)]
+    no_preserve_times: bool,
+
+    /// Regex pattern to exclude matching files and directories
     #[arg(short, long, value_name = "EXCLUDE", global = true)]
     exclude: Option<String>,
 
@@ -41,20 +45,19 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Copy from source to destination
+    /// Copy files from source to destination (supports local paths and backend URIs)
     Copy {
-        /// Source path (e.g., file:///path/to/source)
+        /// Source path (supports local paths and URIs, e.g., file:///path/to/source)
         source: String,
-        /// Destination path (e.g., file:///path/to/dest)
+        /// Destination path (supports local paths and URIs, e.g., file:///path/to/dest)
         destination: String,
     },
-    /// Delete a file or directory
+    /// Delete files or directories recursively
     Delete {
-        /// Path to delete (e.g., file:///path/to/delete)
+        /// Path to delete (supports local paths and URIs, e.g., file:///path/to/delete)
         path: String,
     },
     /// Sync a file from source to destination using chunked hashing
-    #[clap(hide = true)]
     Sync {
         /// Source path (e.g., file:///path/to/source)
         source: String,
@@ -67,7 +70,6 @@ enum Commands {
 use parsync::backends::backend_and_path;
 
 fn main() {
-    // Initialize logging using env_logger and PARSYNC_LOG
     env_logger::Builder::from_env(env_logger::Env::new().filter("PARSYNC_LOG")).init();
 
     let cli = Cli::parse();
@@ -120,6 +122,7 @@ fn main() {
                 exclude: exclude_re.as_ref(),
                 dry_run: cli.dry_run,
                 no_progress: cli.no_progress,
+                no_preserve_times: cli.no_preserve_times,
             };
 
             match parsync::copy(src_backend, src_path, dst_backend, dst_path, &options) {
@@ -156,7 +159,7 @@ fn main() {
                 }
             };
 
-            let result = parsync::sync_dir_chunked(
+            let result = parsync::sync(
                 src_backend,
                 src_path,
                 dst_backend,

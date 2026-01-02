@@ -13,10 +13,15 @@ impl Default for LocalBackend {
     }
 }
 
+/// Local filesystem backend implementation.
+/// Provides simple list/get/put/delete and optimized copy fallback semantics.
 impl LocalBackend {
     pub fn new() -> Self {
         Self
     }
+    /// Copy a file from `src` to `dst`, returning the number of bytes copied.
+    /// Falls back to streaming copy when `std::fs::copy` fails (e.g., cross-device moves),
+    /// using the provided buffer to minimize allocations.
     pub fn copy_file(&self, src: &str, dst: &str, buf: &mut [u8]) -> Result<u64, SyncError> {
         match fs::copy(src, dst) {
             Ok(bytes) => Ok(bytes),
@@ -66,6 +71,8 @@ impl StorageBackend for LocalBackend {
         Ok(())
     }
 
+    /// Delete a local file or directory.
+    /// Directories are removed recursively via `remove_dir_all`; files via `remove_file`.
     fn delete(&self, path: &str) -> Result<(), SyncError> {
         if Path::new(path).is_dir() {
             fs::remove_dir_all(path)?;

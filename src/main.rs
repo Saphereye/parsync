@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use parsync::backends::backend_and_path;
 use std::num::NonZeroUsize;
 
 mod backends;
@@ -6,7 +7,7 @@ mod sync;
 mod utils;
 
 /// Command-line interface for parsync
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "parsync", version, about = "A parallel file synchronizer")]
 struct Cli {
     /// Number of worker threads to use across operations
@@ -27,15 +28,15 @@ struct Cli {
     #[arg(short, long, value_name = "EXCLUDE", global = true)]
     exclude: Option<String>,
 
-    /// Enables dry-run mode (global)
+    /// Enables dry-run mode
     #[arg(long, global = true)]
     dry_run: bool,
 
-    /// Disables the progress bar (global)
+    /// Disables the progress bar
     #[arg(long, global = true)]
     no_progress: bool,
 
-    /// Enables diffing of source and destination directories (global)
+    /// Enables diffing of source and destination directories
     #[arg(long, global = true)]
     diff: bool,
 
@@ -45,7 +46,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Copy files from source to destination (supports local paths and backend URIs)
+    /// Copy files from source to destination
     Copy {
         /// Source path (supports local paths and URIs, e.g., file:///path/to/source)
         source: String,
@@ -57,7 +58,7 @@ enum Commands {
         /// Path to delete (supports local paths and URIs, e.g., file:///path/to/delete)
         path: String,
     },
-    /// Sync a file from source to destination using chunked hashing
+    /// Sync only those files which differ
     Sync {
         /// Source path (e.g., file:///path/to/source)
         source: String,
@@ -65,9 +66,6 @@ enum Commands {
         destination: String,
     },
 }
-
-/// Parse a protocol-prefixed path and return (protocol, path)
-use parsync::backends::backend_and_path;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::new().filter("PARSYNC_LOG")).init();

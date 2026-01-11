@@ -1,8 +1,10 @@
 [package]
 name = "parsync"
-version = "0.2.0"
+version = "0.2.3"
 edition = "2021"
 description = "A parallel file synchronizer"
+authors = ["Adarsh Das <adarshdas950@gmail.com>"]
+repository = "https://github.com/Saphereye/parsync"
 
 [dependencies]
 ascii_table = "4.0.6"

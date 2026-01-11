@@ -433,30 +433,10 @@ pub fn delete(
     let include_producer = include.cloned();
     let exclude_producer = exclude.cloned();
 
-    // Up-front walk to count total items for progress bar
-    let mut total_count = 0u64;
-    for entry in walkdir::WalkDir::new(&path_buf)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let file_str = entry.path().to_string_lossy();
-        if let Some(ref re) = include_producer {
-            if !re.is_match(&file_str) {
-                continue;
-            }
-        }
-        if let Some(ref re) = exclude_producer {
-            if re.is_match(&file_str) {
-                continue;
-            }
-        }
-        total_count += 1;
-    }
-
     let pb = if no_progress {
         None
     } else {
-        let pb = ProgressBar::new(total_count);
+        let pb = ProgressBar::new(0);
         pb.set_style(
             ProgressStyle::with_template(
                 "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} deleted ({eta})",

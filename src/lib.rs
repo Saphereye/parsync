@@ -414,10 +414,9 @@ fn fast_copy(
 }
 
 /// Parallel, fast recursive delete using producer-consumer model.
-/// Shows progress bar unless no_progress is set, and supports include/exclude filters.
 pub fn delete(
     backend: Arc<dyn crate::backends::StorageBackend + Sync + Send>,
-    path: &str,
+    roots: &[String],
     threads: usize,
     dry_run: bool,
     no_progress: bool,
@@ -426,10 +425,7 @@ pub fn delete(
 ) -> Result<(), SyncError> {
     use indicatif::{ProgressBar, ProgressStyle};
 
-    // Always use parallel, producer-consumer delete logic with progress bar and filtering
-
     let (tx, rx) = crossbeam_channel::unbounded();
-    let path_buf = path.to_string();
     let include_producer = include.cloned();
     let exclude_producer = exclude.cloned();
 
@@ -449,92 +445,99 @@ pub fn delete(
 
     let tx_producer = tx.clone();
     let pb_producer = pb.clone();
-    let producer = std::thread::spawn(move || {
-        let mut dirs = Vec::new();
-        for entry in walkdir::WalkDir::new(&path_buf)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let file_str = entry.path().to_string_lossy();
-            if let Some(ref re) = include_producer {
-                if !re.is_match(&file_str) {
-                    continue;
-                }
-            }
-            if let Some(ref re) = exclude_producer {
-                if re.is_match(&file_str) {
-                    continue;
-                }
-            }
-            let meta = entry.metadata();
-            if let Ok(meta) = meta {
-                if meta.is_file() {
-                    tx_producer
-                        .send((entry.path().to_path_buf(), false))
-                        .expect("send file");
-                    if let Some(pb) = pb_producer.as_ref() {
-                        pb.set_length(pb.length().unwrap_or(0) + 1);
-                    }
-                } else if meta.is_dir() {
-                    dirs.push(entry.path().to_path_buf());
-                }
-            }
-        }
-        // Send dirs in reverse order (deepest first)
-        dirs.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
-        for dir in dirs {
-            tx_producer.send((dir, true)).expect("send dir");
-            if let Some(pb) = pb_producer.as_ref() {
-                pb.set_length(pb.length().unwrap_or(0) + 1);
-            }
-        }
-        drop(tx_producer);
-    });
-    drop(tx);
 
-    let rx = Arc::new(rx);
-    let errors: Arc<Mutex<Vec<SyncError>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut handles = Vec::new();
-
-    for _ in 0..threads {
-        let rx = Arc::clone(&rx);
-        let backend = Arc::clone(&backend);
-        let errors = Arc::clone(&errors);
-        let pb = pb.clone();
-        let handle = std::thread::spawn(move || {
-            while let Ok((path, _)) = rx.recv() {
-                if dry_run {
-                    println!("Would delete: {}", path.display());
-                    continue;
-                }
-                let path_str = path.to_string_lossy();
-                let res = backend.delete(&path_str);
-                if res.is_ok() {
-                    if let Some(ref pb) = pb {
-                        pb.inc(1);
+    // Use scoped threads to avoid 'static requirement
+    let errors = thread::scope(|s| {
+        // Producer thread - can borrow roots directly
+        s.spawn(|| {
+            let mut dirs = Vec::new();
+            for root in roots {
+                // Direct borrow, no clone needed!
+                for entry in walkdir::WalkDir::new(root)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let file_str = entry.path().to_string_lossy();
+                    if let Some(ref re) = include_producer {
+                        if !re.is_match(&file_str) {
+                            continue;
+                        }
                     }
-                } else if let Err(e) = res {
-                    errors.lock().unwrap().push(e);
+                    if let Some(ref re) = exclude_producer {
+                        if re.is_match(&file_str) {
+                            continue;
+                        }
+                    }
+                    let meta = entry.metadata();
+                    if let Ok(meta) = meta {
+                        if meta.is_file() {
+                            tx_producer
+                                .send((entry.path().to_path_buf(), false))
+                                .expect("send file");
+                            if let Some(pb) = pb_producer.as_ref() {
+                                pb.set_length(pb.length().unwrap_or(0) + 1);
+                            }
+                        } else if meta.is_dir() {
+                            dirs.push(entry.path().to_path_buf());
+                        }
+                    }
                 }
             }
+            dirs.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
+            for dir in dirs {
+                tx_producer.send((dir, true)).expect("send dir");
+                if let Some(pb) = pb_producer.as_ref() {
+                    pb.set_length(pb.length().unwrap_or(0) + 1);
+                }
+            }
+            drop(tx_producer);
         });
-        handles.push(handle);
-    }
 
-    producer.join().expect("Producer thread panicked");
-    for handle in handles {
-        handle.join().expect("Worker thread panicked");
-    }
+        drop(tx);
+        let rx = Arc::new(rx);
+        let errors: Arc<Mutex<Vec<SyncError>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Consumer threads
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            let rx = Arc::clone(&rx);
+            let backend = Arc::clone(&backend);
+            let errors = Arc::clone(&errors);
+            let pb = pb.clone();
+
+            let handle = s.spawn(move || {
+                while let Ok((path, _)) = rx.recv() {
+                    if dry_run {
+                        println!("Would delete: {}", path.display());
+                        continue;
+                    }
+                    let path_str = path.to_string_lossy();
+                    let res = backend.delete(&path_str);
+                    if res.is_ok() {
+                        if let Some(ref pb) = pb {
+                            pb.inc(1);
+                        }
+                    } else if let Err(e) = res {
+                        errors.lock().unwrap().push(e);
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        Arc::try_unwrap(errors).unwrap().into_inner().unwrap()
+    });
+
     if let Some(pb) = pb {
         pb.finish_with_message("Delete complete");
     }
 
-    let errors = Arc::try_unwrap(errors).unwrap().into_inner().unwrap();
     if !errors.is_empty() {
         return Err(SyncError::Other(format!(
             "{} errors occurred during delete",
             errors.len()
         )));
     }
+
     Ok(())
 }

@@ -25,6 +25,9 @@ parsync sync ~/Downloads ~/Downloads_copy  0.14s user 0.66s system 142% cpu 0.56
 ### Delete of copy
 ```bash
 parsync delete ~/Downloads_copy  0.19s user 1.21s system 276% cpu 0.507 total
+
+# Example: Delete using glob patterns (local paths only)
+parsync delete ~/Downloads_copy/* lib*
 ```
 
 ## Usage

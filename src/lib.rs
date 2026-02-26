@@ -446,13 +446,10 @@ pub fn delete(
     let tx_producer = tx.clone();
     let pb_producer = pb.clone();
 
-    // Use scoped threads to avoid 'static requirement
-    let errors = thread::scope(|s| {
-        // Producer thread - can borrow roots directly
+    let errors: Vec<SyncError> = thread::scope(|s| {
         s.spawn(|| {
             let mut dirs = Vec::new();
             for root in roots {
-                // Direct borrow, no clone needed!
                 for entry in walkdir::WalkDir::new(root)
                     .into_iter()
                     .filter_map(|e| e.ok())
@@ -495,17 +492,14 @@ pub fn delete(
 
         drop(tx);
         let rx = Arc::new(rx);
-        let errors: Arc<Mutex<Vec<SyncError>>> = Arc::new(Mutex::new(Vec::new()));
-
-        // Consumer threads
-        let mut handles = Vec::new();
+        let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         for _ in 0..threads {
             let rx = Arc::clone(&rx);
             let backend = Arc::clone(&backend);
             let errors = Arc::clone(&errors);
             let pb = pb.clone();
 
-            let handle = s.spawn(move || {
+            s.spawn(move || {
                 while let Ok((path, _)) = rx.recv() {
                     if dry_run {
                         println!("Would delete: {}", path.display());
@@ -518,14 +512,14 @@ pub fn delete(
                             pb.inc(1);
                         }
                     } else if let Err(e) = res {
-                        errors.lock().unwrap().push(e);
+                        errors.lock().unwrap().push(format!("{:?}", e));
                     }
                 }
             });
-            handles.push(handle);
         }
 
-        Arc::try_unwrap(errors).unwrap().into_inner().unwrap()
+        let guard = errors.lock().unwrap();
+        guard.iter().map(|e| SyncError::Other(e.clone())).collect()
     });
 
     if let Some(pb) = pb {

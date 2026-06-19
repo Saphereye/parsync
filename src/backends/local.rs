@@ -2,9 +2,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use super::{FileEntry, StorageBackend, SyncError};
+use super::{FileEntry, FileMeta, StorageBackend, SyncError};
 
-/// Local filesystem backend implementation
 pub struct LocalBackend;
 
 impl Default for LocalBackend {
@@ -13,20 +12,15 @@ impl Default for LocalBackend {
     }
 }
 
-/// Local filesystem backend implementation.
-/// Provides simple list/get/put/delete and optimized copy fallback semantics.
 impl LocalBackend {
     pub fn new() -> Self {
         Self
     }
-    /// Copy a file from `src` to `dst`, returning the number of bytes copied.
-    /// Falls back to streaming copy when `std::fs::copy` fails (e.g., cross-device moves),
-    /// using the provided buffer to minimize allocations.
+
     pub fn copy_file(&self, src: &str, dst: &str, buf: &mut [u8]) -> Result<u64, SyncError> {
         match fs::copy(src, dst) {
             Ok(bytes) => Ok(bytes),
             Err(_) => {
-                // Fallback to streaming copy if std::fs::copy fails (e.g., cross-device)
                 let mut src_file = fs::File::open(src)?;
                 let mut dst_file = fs::File::create(dst)?;
                 let mut total_bytes = 0u64;
@@ -49,10 +43,14 @@ impl StorageBackend for LocalBackend {
         let mut entries = Vec::new();
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            let metadata = entry.metadata()?;
+            let meta = entry.metadata()?;
             entries.push(FileEntry {
                 path: entry.path().to_string_lossy().to_string(),
-                metadata,
+                metadata: FileMeta {
+                    size: meta.len(),
+                    is_dir: meta.is_dir(),
+                    modified: meta.modified().ok(),
+                },
             });
         }
         Ok(entries)
@@ -71,13 +69,15 @@ impl StorageBackend for LocalBackend {
         Ok(())
     }
 
-    /// Delete a local file or directory.
-    /// Directories are removed recursively via `remove_dir_all`; files via `remove_file`.
     fn delete(&self, path: &str) -> Result<(), SyncError> {
         if Path::new(path).is_dir() {
             fs::remove_dir_all(path)?;
         } else {
-            fs::remove_file(path)?;
+            match fs::remove_file(path) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(SyncError::Io(e)),
+            }
         }
         Ok(())
     }

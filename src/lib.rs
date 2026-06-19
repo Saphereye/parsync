@@ -1,23 +1,10 @@
-/// Project overview:
-/// - High-performance parallel operations: copy, delete, and sync
-/// - Uses a producer-consumer model with dynamic progress bars
-/// - Local backends leverage OS-assisted fast paths (reflink/copy_file_range/sendfile) where available
-/// - Include/exclude filtering via Regex
-/// - Concurrency is tunable; progress reporting can be disabled
-///
-/// Key behaviors:
-/// - Copy: local-to-local uses fast OS paths, preserves source mtime by default (configurable)
-/// - Delete: parallel producer-consumer; counts total via WalkDir (or dynamic), deletes files first, then dirs (deepest-first)
-/// - Sync: optimized for local disk; skips via size+mtime, whole-file copy on change, lock-free work sharing
-///
-/// Flags:
-/// - no_progress: disables progress bar
-/// - no_preserve_times: disables preserving source mtime on destination copies
 pub mod backends;
 pub mod sync;
 pub mod utils;
 
-pub use backends::{FileEntry, LocalBackend, StorageBackend, SyncError};
+pub use backends::{
+    backend_and_path, FileEntry, LocalBackend, SshBackend, StorageBackend, SyncError,
+};
 pub use sync::sync;
 
 use crossbeam_channel::unbounded;
@@ -25,7 +12,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
-/// Copy a file or directory from source to destination using the provided backends.
 use walkdir::WalkDir;
 
 pub struct CopyOptions<'a> {
@@ -44,10 +30,8 @@ pub fn copy(
     dest_path: &str,
     options: &CopyOptions,
 ) -> Result<(), SyncError> {
-    // Channel for file paths
     let (tx, rx) = unbounded();
 
-    // Progress bar: start as spinner, switch to bar when total is known
     let pb = if options.no_progress {
         None
     } else {
@@ -57,7 +41,6 @@ pub fn copy(
         Some(pb)
     };
 
-    // Producer thread
     let source_path_buf = source_path.to_string();
     let include = options.include.cloned();
     let exclude = options.exclude.cloned();
@@ -112,12 +95,10 @@ pub fn copy(
                 pb.set_length(total_bytes);
             }
         }
-        // Do NOT clear or finish the progress bar here!
         drop(tx_producer);
     });
     drop(tx);
 
-    // PRE-COMPUTE backend types once (not per file!)
     let is_local_src = source
         .as_ref()
         .as_any()
@@ -125,7 +106,6 @@ pub fn copy(
     let is_local_dst = dest.as_ref().as_any().is::<crate::backends::LocalBackend>();
     let both_local = is_local_src && is_local_dst;
 
-    // Worker threads
     let mut handles = Vec::new();
     let rx = Arc::new(rx);
     let errors: Arc<Mutex<Vec<SyncError>>> = Arc::new(Mutex::new(Vec::new()));
@@ -142,18 +122,13 @@ pub fn copy(
         let errors = Arc::clone(&errors);
 
         let handle = thread::spawn(move || {
-            // PRE-ALLOCATE paths outside the loop with capacity
             let mut src_file = PathBuf::with_capacity(256);
             let mut dst_file = PathBuf::with_capacity(256);
-
-            // Buffer for copying
             let mut _buf = vec![0u8; 1024 * 1024];
-            // Cache created directories to avoid repeated create_dir_all
             let mut created_dirs: std::collections::HashSet<PathBuf> =
                 std::collections::HashSet::new();
 
             while let Ok((rel_path, size)) = rx.recv() {
-                // REUSE PathBufs - clear and rebuild (reuses allocation)
                 src_file.clear();
                 src_file.push(&source_path);
                 src_file.push(&rel_path);
@@ -169,7 +144,6 @@ pub fn copy(
                     continue;
                 }
 
-                // Fast path: both local (your common case)
                 if both_local {
                     if let Some(parent) = dst_file.parent() {
                         if !created_dirs.contains(parent) {
@@ -184,7 +158,6 @@ pub fn copy(
                         }
                     }
 
-                    // Fast local-to-local copy using OS-assisted mechanisms, with robust fallbacks
                     let mut copied = fast_copy(
                         &src_file,
                         &dst_file,
@@ -195,7 +168,6 @@ pub fn copy(
                         !no_preserve_times,
                     );
                     if copied == 0 {
-                        // Fallback 1: std::fs::copy
                         match std::fs::copy(src_file.to_str().unwrap(), dst_file.to_str().unwrap())
                         {
                             Ok(n) => {
@@ -214,7 +186,6 @@ pub fn copy(
                                 }
                             }
                             Err(fs_err) => {
-                                // Fallback 2: streaming copy via LocalBackend
                                 if let Some(src_local) = source
                                     .as_ref()
                                     .as_any()
@@ -229,7 +200,6 @@ pub fn copy(
                                             copied = size;
                                         }
                                         Err(be_err) => {
-                                            // Log both errors and mark failure
                                             errors
                                                 .lock()
                                                 .unwrap()
@@ -263,45 +233,63 @@ pub fn copy(
                         pb.inc(copied.max(size));
                     }
                     continue;
-                } else {
-                    // Fallback: get/put
-                    match source.get(src_file.to_str().unwrap()) {
-                        Ok(data) => {
-                            if let Some(parent) = dst_file.parent() {
-                                if let Err(e) = std::fs::create_dir_all(parent) {
-                                    errors.lock().unwrap().push(SyncError::Io(e));
-                                    if let Some(pb) = pb_worker.as_ref() {
-                                        pb.inc(size);
-                                    }
-                                    continue;
+                } else if is_local_src {
+                    if is_local_dst {
+                        if let Some(parent) = dst_file.parent() {
+                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                errors.lock().unwrap().push(SyncError::Io(e));
+                                if let Some(pb) = pb_worker.as_ref() {
+                                    pb.inc(size);
                                 }
+                                continue;
                             }
-                            match dest.put(dst_file.to_str().unwrap(), &data) {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    errors.lock().unwrap().push(e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            errors.lock().unwrap().push(e);
                         }
                     }
-                }
-
-                if let Some(pb) = pb_worker.as_ref() {
-                    pb.inc(size);
+                    match std::fs::File::open(&src_file) {
+                        Ok(mut f) => {
+                            if let Err(e) =
+                                dest.put_stream(dst_file.to_str().unwrap(), &mut f, size)
+                            {
+                                errors.lock().unwrap().push(e);
+                            }
+                        }
+                        Err(e) => errors.lock().unwrap().push(SyncError::Io(e)),
+                    }
+                    if let Some(pb) = pb_worker.as_ref() {
+                        pb.inc(size);
+                    }
+                } else {
+                    if is_local_dst {
+                        if let Some(parent) = dst_file.parent() {
+                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                errors.lock().unwrap().push(SyncError::Io(e));
+                                if let Some(pb) = pb_worker.as_ref() {
+                                    pb.inc(size);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    match source.get(src_file.to_str().unwrap()) {
+                        Ok(data) => {
+                            if let Err(e) = dest.put(dst_file.to_str().unwrap(), &data) {
+                                errors.lock().unwrap().push(e);
+                            }
+                        }
+                        Err(e) => errors.lock().unwrap().push(e),
+                    }
+                    if let Some(pb) = pb_worker.as_ref() {
+                        pb.inc(size);
+                    }
                 }
             }
-            log::info!("Worker exiting");
         });
         handles.push(handle);
     }
 
     producer.join().expect("Producer thread panicked");
-    for (i, handle) in handles.into_iter().enumerate() {
+    for handle in handles {
         handle.join().expect("Worker thread panicked");
-        log::info!("Joined worker thread {}", i);
     }
     if let Some(pb) = pb.as_ref() {
         pb.finish_with_message("Copy complete");
@@ -345,12 +333,10 @@ fn fast_copy(
     };
 
     unsafe {
-        // Try reflink/clone (FICLONE) first
         const FICLONE: libc::c_ulong = 0x4004_9409;
         if libc::ioctl(dst_f.as_raw_fd(), FICLONE, src_f.as_raw_fd()) == 0 {
             copied_bytes = size;
         } else {
-            // Try copy_file_range loop
             let in_fd = src_f.as_raw_fd();
             let out_fd = dst_f.as_raw_fd();
             let mut off_in: libc::loff_t = 0;
@@ -366,7 +352,6 @@ fn fast_copy(
                 }
             }
 
-            // Fallback to sendfile if nothing copied
             if copied_bytes == 0 {
                 let mut offset: libc::off_t = 0;
                 loop {
@@ -413,7 +398,6 @@ fn fast_copy(
     copied
 }
 
-/// Parallel, fast recursive delete using producer-consumer model.
 pub fn delete(
     backend: Arc<dyn crate::backends::StorageBackend + Sync + Send>,
     roots: &[String],
@@ -425,7 +409,7 @@ pub fn delete(
 ) -> Result<(), SyncError> {
     use indicatif::{ProgressBar, ProgressStyle};
 
-    let (tx, rx) = crossbeam_channel::unbounded();
+    let (tx, rx) = crossbeam_channel::unbounded::<PathBuf>();
     let include_producer = include.cloned();
     let exclude_producer = exclude.cloned();
 
@@ -443,89 +427,97 @@ pub fn delete(
         Some(pb)
     };
 
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    for root in roots {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let file_str = entry.path().to_string_lossy();
+            if let Some(ref re) = include_producer {
+                if !re.is_match(&file_str) {
+                    continue;
+                }
+            }
+            if let Some(ref re) = exclude_producer {
+                if re.is_match(&file_str) {
+                    continue;
+                }
+            }
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    files.push(entry.path().to_path_buf());
+                } else if meta.is_dir() {
+                    dirs.push(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+
+    dirs.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
+
+    if let Some(ref pb) = pb {
+        pb.set_length((files.len() + dirs.len()) as u64);
+    }
+
     let tx_producer = tx.clone();
-    let pb_producer = pb.clone();
+    for f in files {
+        tx_producer.send(f).expect("send file");
+    }
+    drop(tx_producer);
+    drop(tx);
 
-    let errors: Vec<SyncError> = thread::scope(|s| {
-        s.spawn(|| {
-            let mut dirs = Vec::new();
-            for root in roots {
-                for entry in walkdir::WalkDir::new(root)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                {
-                    let file_str = entry.path().to_string_lossy();
-                    if let Some(ref re) = include_producer {
-                        if !re.is_match(&file_str) {
-                            continue;
-                        }
-                    }
-                    if let Some(ref re) = exclude_producer {
-                        if re.is_match(&file_str) {
-                            continue;
-                        }
-                    }
-                    let meta = entry.metadata();
-                    if let Ok(meta) = meta {
-                        if meta.is_file() {
-                            tx_producer
-                                .send((entry.path().to_path_buf(), false))
-                                .expect("send file");
-                            if let Some(pb) = pb_producer.as_ref() {
-                                pb.set_length(pb.length().unwrap_or(0) + 1);
-                            }
-                        } else if meta.is_dir() {
-                            dirs.push(entry.path().to_path_buf());
-                        }
-                    }
-                }
-            }
-            dirs.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
-            for dir in dirs {
-                tx_producer.send((dir, true)).expect("send dir");
-                if let Some(pb) = pb_producer.as_ref() {
-                    pb.set_length(pb.length().unwrap_or(0) + 1);
-                }
-            }
-            drop(tx_producer);
-        });
+    let error_acc: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        drop(tx);
+    thread::scope(|s| {
         let rx = Arc::new(rx);
-        let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         for _ in 0..threads {
             let rx = Arc::clone(&rx);
             let backend = Arc::clone(&backend);
-            let errors = Arc::clone(&errors);
+            let errors = Arc::clone(&error_acc);
             let pb = pb.clone();
 
             s.spawn(move || {
-                while let Ok((path, _)) = rx.recv() {
+                while let Ok(path) = rx.recv() {
                     if dry_run {
                         println!("Would delete: {}", path.display());
                         continue;
                     }
-                    let path_str = path.to_string_lossy();
-                    let res = backend.delete(&path_str);
-                    if res.is_ok() {
-                        if let Some(ref pb) = pb {
-                            pb.inc(1);
+                    match backend.delete(&path.to_string_lossy()) {
+                        Ok(_) => {
+                            if let Some(ref pb) = pb {
+                                pb.inc(1);
+                            }
                         }
-                    } else if let Err(e) = res {
-                        errors.lock().unwrap().push(format!("{:?}", e));
+                        Err(e) => errors.lock().unwrap().push(format!("{e:?}")),
                     }
                 }
             });
         }
-
-        let guard = errors.lock().unwrap();
-        guard.iter().map(|e| SyncError::Other(e.clone())).collect()
     });
+
+    for dir in &dirs {
+        if dry_run {
+            println!("Would delete: {}", dir.display());
+            continue;
+        }
+        match backend.delete(&dir.to_string_lossy()) {
+            Ok(_) => {
+                if let Some(ref pb) = pb {
+                    pb.inc(1);
+                }
+            }
+            Err(e) => error_acc.lock().unwrap().push(format!("{e:?}")),
+        }
+    }
 
     if let Some(pb) = pb {
         pb.finish_with_message("Delete complete");
     }
 
+    let errors = Arc::try_unwrap(error_acc).unwrap().into_inner().unwrap();
     if !errors.is_empty() {
         return Err(SyncError::Other(format!(
             "{} errors occurred during delete",

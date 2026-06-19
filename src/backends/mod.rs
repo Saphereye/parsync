@@ -1,9 +1,8 @@
-#[allow(dead_code)]
 pub mod local;
+pub mod ssh;
 
-use std::fs;
+use std::sync::Arc;
 
-#[allow(dead_code, unused)]
 #[derive(Debug)]
 pub enum SyncError {
     Io(std::io::Error),
@@ -17,61 +16,80 @@ impl From<std::io::Error> for SyncError {
     }
 }
 
-#[allow(dead_code, unused)]
+#[derive(Debug, Clone)]
+pub struct FileMeta {
+    pub size: u64,
+    pub is_dir: bool,
+    pub modified: Option<std::time::SystemTime>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub path: String,
-    pub metadata: fs::Metadata,
+    pub metadata: FileMeta,
 }
 
-#[allow(dead_code, unused)]
-/// StorageBackend defines the abstract operations over a storage system.
-/// Implementations must be `Send + Sync + Any` and safe to use across threads.
-///
-/// Contract:
-/// - `list`: Return entries for a given path without side effects.
-/// - `get`: Read a file's bytes from the backend.
-/// - `put`: Write bytes to a destination path (create parents as needed).
-/// - `delete`: Remove a file or directory (recursive for directories).
-/// - `exists`: Return whether the path exists.
-/// - `as_any`: Downcast support for concrete backend-specific behavior.
 pub trait StorageBackend: Send + Sync + std::any::Any {
-    /// List files and directories at `path`.
-    /// Returns a vector of `FileEntry` describing the found items.
     fn list(&self, path: &str) -> Result<Vec<FileEntry>, SyncError>;
-    /// Read and return the full contents of the file at `path` as bytes.
     fn get(&self, path: &str) -> Result<Vec<u8>, SyncError>;
-    /// Write `data` to the file at `path`, creating parents if necessary.
     fn put(&self, path: &str, data: &[u8]) -> Result<(), SyncError>;
-    /// Delete the file or directory at `path`. Implementations should handle
-    /// recursive deletion for directories.
     fn delete(&self, path: &str) -> Result<(), SyncError>;
-    /// Return `true` if `path` exists in the backend, `false` otherwise.
     fn exists(&self, path: &str) -> Result<bool, SyncError>;
-    /// Return a `&dyn Any` reference for downcasting to the concrete backend type.
     fn as_any(&self) -> &dyn std::any::Any;
+
+    fn put_stream(
+        &self,
+        path: &str,
+        reader: &mut dyn std::io::Read,
+        size: u64,
+    ) -> Result<(), SyncError> {
+        let mut data = Vec::with_capacity(size as usize);
+        reader.read_to_end(&mut data)?;
+        self.put(path, &data)
+    }
 }
 
 pub use local::LocalBackend;
+pub use ssh::SshBackend;
 
-/// Given a protocol-prefixed path, returns (Box<dyn StorageBackend>, normalized_path).
-/// Example: "file:///tmp/foo" -> (LocalBackend, "/tmp/foo")
-use std::sync::Arc;
-
-#[allow(dead_code, unused)]
 pub fn backend_and_path(
     url: &str,
+    pool_size: usize,
 ) -> Result<(Arc<dyn StorageBackend + Send + Sync>, &str), SyncError> {
     if let Some(idx) = url.find("://") {
         let (proto, rest) = url.split_at(idx);
-        let path = &rest[3..];
+        let after_scheme = &rest[3..];
         match proto {
-            "file" => Ok((Arc::new(LocalBackend::new()), path)),
-            // "ssh" | "sftp" => Ok((Arc::new(SshBackend::new()), path)), // Placeholder for future
-            _ => Err(SyncError::Other(format!("Unsupported protocol: {}", proto))),
+            "file" => Ok((Arc::new(LocalBackend::new()), after_scheme)),
+            "ssh" => {
+                let (user, host_port_path) = if let Some(at) = after_scheme.find('@') {
+                    (after_scheme[..at].to_string(), &after_scheme[at + 1..])
+                } else {
+                    (
+                        std::env::var("USER").unwrap_or_else(|_| "root".to_string()),
+                        after_scheme,
+                    )
+                };
+
+                let slash = host_port_path
+                    .find('/')
+                    .ok_or_else(|| SyncError::Other(format!("SSH URI missing path: {url}")))?;
+                let host_port = &host_port_path[..slash];
+                let remote_path = &host_port_path[slash..];
+
+                let (host, port) = if let Some(colon) = host_port.rfind(':') {
+                    let p = host_port[colon + 1..].parse::<u16>().unwrap_or(22);
+                    (&host_port[..colon], p)
+                } else {
+                    (host_port, 22u16)
+                };
+
+                let backend = SshBackend::connect(&user, host, port, pool_size)?;
+                Ok((Arc::new(backend), remote_path))
+            }
+            _ => Err(SyncError::Other(format!("Unsupported protocol: {proto}"))),
         }
     } else {
-        // Default to local file if no protocol specified
         Ok((Arc::new(LocalBackend::new()), url))
     }
 }

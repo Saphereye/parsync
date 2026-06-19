@@ -2,11 +2,6 @@ use clap::{Parser, Subcommand};
 use parsync::backends::backend_and_path;
 use std::num::NonZeroUsize;
 
-mod backends;
-mod sync;
-mod utils;
-
-/// Command-line interface for parsync
 #[derive(Parser)]
 #[command(name = "parsync", version, about = "A parallel file synchronizer")]
 struct Cli {
@@ -48,7 +43,7 @@ struct Cli {
 enum Commands {
     /// Copy files from source(s) to destination
     Copy {
-        /// Source path(s). Globs are expanded for local files. (e.g., src/* or libvb_*)
+        /// Source path(s). Globs are expanded for local files.
         sources: Vec<String>,
         /// Destination path (supports local paths and URIs, e.g., file:///path/to/dest)
         destination: String,
@@ -81,7 +76,6 @@ fn main() {
             use std::collections::BTreeSet;
             use std::fs;
 
-            // Expand all globs and deduplicate
             let mut all_sources = BTreeSet::new();
             let mut backend_opt = None;
 
@@ -109,7 +103,7 @@ fn main() {
                 }
 
                 for expanded_path in expanded {
-                    match backend_and_path(&expanded_path) {
+                    match backend_and_path(&expanded_path, cli.threads) {
                         Ok((b, p)) => {
                             if backend_opt.is_none() {
                                 backend_opt = Some(b);
@@ -128,7 +122,7 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let (dst_backend, dst_path) = match backend_and_path(&destination) {
+            let (dst_backend, dst_path) = match backend_and_path(&destination, cli.threads) {
                 Ok((b, p)) => (b, p),
                 Err(e) => {
                     eprintln!("Invalid destination: {:?}", e);
@@ -136,7 +130,6 @@ fn main() {
                 }
             };
 
-            // If multiple sources, destination must be a directory
             if all_sources.len() > 1 {
                 let meta = fs::metadata(dst_path);
                 if meta.as_ref().map(|m| !m.is_dir()).unwrap_or(false) {
@@ -145,7 +138,6 @@ fn main() {
                 }
             }
 
-            // Prepare regex filters
             let include_re = match &cli.include {
                 Some(pattern) => match regex::Regex::new(pattern) {
                     Ok(re) => Some(re),
@@ -178,7 +170,6 @@ fn main() {
 
             let src_backend = backend_opt.unwrap();
 
-            // If only one source, use original logic
             if all_sources.len() == 1 {
                 let src_path = all_sources.iter().next().unwrap();
                 match parsync::copy(
@@ -192,7 +183,6 @@ fn main() {
                     Err(e) => eprintln!("Copy failed: {:?}", e),
                 }
             } else {
-                // Multiple sources: copy each into destination directory
                 let mut any_failed = false;
                 for src_path in all_sources {
                     let file_name = std::path::Path::new(&src_path)
@@ -230,7 +220,6 @@ fn main() {
             use std::collections::BTreeSet;
             use std::fs;
 
-            // Expand all globs and deduplicate
             let mut all_sources = BTreeSet::new();
             let mut backend_opt = None;
 
@@ -258,7 +247,7 @@ fn main() {
                 }
 
                 for expanded_path in expanded {
-                    match backend_and_path(&expanded_path) {
+                    match backend_and_path(&expanded_path, cli.threads) {
                         Ok((b, p)) => {
                             if backend_opt.is_none() {
                                 backend_opt = Some(b);
@@ -277,7 +266,7 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let (dst_backend, dst_path) = match backend_and_path(&destination) {
+            let (dst_backend, dst_path) = match backend_and_path(&destination, cli.threads) {
                 Ok((b, p)) => (b, p),
                 Err(e) => {
                     eprintln!("Invalid destination: {:?}", e);
@@ -285,7 +274,6 @@ fn main() {
                 }
             };
 
-            // If multiple sources, destination must be a directory
             if all_sources.len() > 1 {
                 let meta = fs::metadata(dst_path);
                 if meta.as_ref().map(|m| !m.is_dir()).unwrap_or(false) {
@@ -296,7 +284,6 @@ fn main() {
 
             let src_backend = backend_opt.unwrap();
 
-            // If only one source, use original logic
             if all_sources.len() == 1 {
                 let src_path = all_sources.iter().next().unwrap();
                 let result = parsync::sync(
@@ -312,7 +299,6 @@ fn main() {
                     Err(e) => eprintln!("Sync failed: {:?}", e),
                 }
             } else {
-                // Multiple sources: sync each into destination directory
                 let mut any_failed = false;
                 for src_path in all_sources {
                     let file_name = std::path::Path::new(&src_path)
@@ -347,7 +333,6 @@ fn main() {
         Commands::Delete { paths } => {
             use glob::glob;
 
-            /* Compile include/exclude regex filters if provided */
             let include_re = match &cli.include {
                 Some(pattern) => match regex::Regex::new(pattern) {
                     Ok(re) => Some(re),
@@ -400,12 +385,11 @@ fn main() {
                 }
 
                 for expanded_path in expanded_paths {
-                    match backend_and_path(&expanded_path) {
+                    match backend_and_path(&expanded_path, cli.threads) {
                         Ok((b, p)) => {
                             if backend_opt.is_none() {
                                 backend_opt = Some(b);
                             }
-                            // Only allow all paths to use the same backend instance
                             all_paths.insert(p.to_string());
                         }
                         Err(e) => {

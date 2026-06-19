@@ -1,18 +1,3 @@
-#![allow(dead_code)]
-
-//! Parallel file synchronization logic for parsync.
-//!
-//! Current behavior:
-//! - Optimized for local filesystems: uses whole-file copy when a file has changed.
-//! - Fast skip for unchanged files via size + modified time (mtime) comparison.
-//! - Lock-free work sharing: workers pull file jobs via an atomic index (no channels).
-//! - Per-worker cache of created directories to reduce redundant create_dir_all calls.
-//! - Progress bar shows total bytes processed (skips and copies).
-//!
-//! Note:
-//! - Previous Adler-32 rolling checksum logic was removed to reduce CPU overhead.
-//! - For remote or low-bandwidth scenarios, a chunked delta approach can be reintroduced behind a feature flag.
-
 use crate::backends::{StorageBackend, SyncError};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
@@ -22,11 +7,9 @@ use std::sync::Arc;
 use std::thread;
 use walkdir::WalkDir;
 
-/// Default chunk size: 1 MiB
 pub const DEFAULT_CHUNK_SIZE: usize = 1 << 20;
-pub const LARGE_FILE_THRESHOLD: u64 = 32 * 1024 * 1024; // 32 MiB
+pub const LARGE_FILE_THRESHOLD: u64 = 32 * 1024 * 1024;
 
-/// Represents a file to sync.
 struct FileJob {
     src_path: PathBuf,
     dst_path: PathBuf,
@@ -34,10 +17,6 @@ struct FileJob {
     src_modified: Option<std::time::SystemTime>,
 }
 
-/// Recursively synchronize a directory from source to destination using parallel workers.
-/// - Creates directories at the destination as needed (including empty ones).
-/// - Skips unchanged files via size + mtime; performs whole-file copy on change.
-/// - Designed for local filesystems; per-worker directory creation cache reduces overhead.
 pub fn sync(
     _src_backend: Arc<dyn StorageBackend + Send + Sync>,
     src_root: &str,
@@ -49,7 +28,6 @@ pub fn sync(
     let src_root_path = Path::new(src_root);
     let dst_root_path = Path::new(dst_root);
 
-    // First pass: collect all files and total size
     let mut files = Vec::new();
     let mut total_bytes = 0u64;
     for entry in WalkDir::new(src_root).min_depth(0) {
@@ -83,7 +61,6 @@ pub fn sync(
         }
     }
 
-    // Progress bar setup
     let pb = if no_progress {
         None
     } else {
@@ -99,11 +76,9 @@ pub fn sync(
         Some(pb)
     };
 
-    // Parallel work-sharing without channels: atomic index over files; workers update progress directly
     let files = Arc::new(files);
     let index = Arc::new(AtomicUsize::new(0));
     let total_files = files.len();
-
     let num_threads = num_cpus::get().max(2);
     let mut workers = Vec::new();
     let pb_shared = pb.clone();
@@ -121,7 +96,6 @@ pub fn sync(
                 }
                 let file = &files[i];
 
-                // Quick skip using pre-scanned src modified time + size
                 let dst_meta = std::fs::metadata(&file.dst_path).ok();
                 let mut skipped = false;
                 if let Some(ref dm) = dst_meta {
@@ -140,7 +114,6 @@ pub fn sync(
                     continue;
                 }
 
-                // Copy whole file for any changed file (fast path)
                 if let Some(parent) = file.dst_path.parent() {
                     if !created_dirs.contains(parent) {
                         let _ = std::fs::create_dir_all(parent);
@@ -193,12 +166,10 @@ fn fast_copy(
     };
 
     unsafe {
-        // Try reflink/clone (FICLONE) first
         const FICLONE: libc::c_ulong = 0x4004_9409;
         if libc::ioctl(dst_f.as_raw_fd(), FICLONE, src_f.as_raw_fd()) == 0 {
             copied_bytes = size;
         } else {
-            // Try copy_file_range loop
             let in_fd = src_f.as_raw_fd();
             let out_fd = dst_f.as_raw_fd();
             let mut off_in: libc::loff_t = 0;
@@ -214,7 +185,6 @@ fn fast_copy(
                 }
             }
 
-            // Fallback to sendfile if nothing copied
             if copied_bytes == 0 {
                 let mut offset: libc::off_t = 0;
                 loop {
@@ -255,5 +225,3 @@ fn fast_copy(
     }
     copied
 }
-
-// write_chunk removed; writes are performed using the already opened dst_file handle
